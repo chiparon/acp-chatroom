@@ -17,6 +17,7 @@ from .protocol import (
     ActionType,
     EventType,
     SessionKey,
+    valid_model_id,
 )
 from .storage import Storage
 
@@ -39,6 +40,7 @@ class ACPHub:
         self.claims: Dict[WebSocketServerProtocol, Claim] = {}
         self.console_sockets: Set[WebSocketServerProtocol] = set()
         self.all_sockets: Set[WebSocketServerProtocol] = set()
+        self.model_sockets: Set[WebSocketServerProtocol] = set()
         self.server = None
         self._running = False
 
@@ -92,6 +94,7 @@ class ACPHub:
             await self._cleanup_connection(websocket)
 
     async def _cleanup_connection(self, websocket: WebSocketServerProtocol) -> None:
+        self.model_sockets.discard(websocket)
         self.claims.pop(websocket, None)
         self.all_sockets.discard(websocket)
         self.console_sockets.discard(websocket)
@@ -180,6 +183,10 @@ class ACPHub:
             self.storage.update_roster(handle, status, claim.session if claim else None)
             self.clients[norm_handle] = websocket
             self.ws_to_handle[websocket] = handle
+            if data.get("supports_model_switch") is True:
+                self.model_sockets.add(websocket)
+            else:
+                self.model_sockets.discard(websocket)
 
             if role == "console" or norm_handle in ("@user", "@human", "@console", "@observer"):
                 self.console_sockets.add(websocket)
@@ -196,6 +203,19 @@ class ACPHub:
                 exclude=websocket,
             )
             return {"status": "ok", "action": "register", "handle": handle}
+
+        if action == ActionType.SET_MODEL.value:
+            model = data.get("model")
+            if not valid_model_id(model):
+                return {"status": "error", "error": "Expected a single model ID"}
+            target = "@" + str(data.get("target", "")).strip().lstrip("@")
+            ws = self.clients.get(target.lower())
+            if ws is None or ws.closed:
+                return {"status": "error", "error": f"{target} is offline"}
+            if ws not in self.model_sockets:
+                return {"status": "error", "error": f"{target} does not support remote model selection"}
+            sent = await self._safe_send(ws, json.dumps({"event": EventType.SET_MODEL.value, "model": model}))
+            return {"status": "ok"} if sent else {"status": "error", "error": "Launcher disconnected"}
 
         # 2. SEND
         elif action == ActionType.SEND.value:

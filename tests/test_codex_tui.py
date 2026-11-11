@@ -22,12 +22,13 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
     class Provider(BaseHTTPRequestHandler):
         def do_POST(self):
             body = self.rfile.read(int(self.headers["Content-Length"]))
-            items = json.loads(body)["input"]
+            payload = json.loads(body)
+            items = payload["input"]
             output = []
             texts = [part.get("text", "") for item in items if item.get("role") == "user"
                      for part in item["content"]]
             if items[-1].get("role") == "user" and texts[-1].startswith("@tester: "):
-                requests.put((self.headers["thread-id"], texts))
+                requests.put((self.headers["thread-id"], texts, payload["model"]))
                 # An actual shell reply exercises the handle and hub URI inherited by this session.
                 output.append({"type": "function_call", "name": "exec_command", "call_id": "call_ack",
                                "arguments": json.dumps({"cmd": "acp-chat send --to tester --mode explicit ack"})})
@@ -92,9 +93,10 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             assert await asyncio.to_thread(ready.wait, 40), repr("".join(screen)[-2000:])
             return launcher, task
 
-        async def turn(handle, text):
+        async def turn(handle, text, expected_model="gpt-5"):
             assert (await sender.send_message(handle, text, MessageMode.EXPLICIT))["delivered"]
-            thread_id, texts = await asyncio.to_thread(requests.get, True, 20)
+            thread_id, texts, model = await asyncio.to_thread(requests.get, True, 20)
+            assert model == expected_model
             assert texts[-1] == f"@tester: {text}"
             reply = (await asyncio.wait_for(replies.get(), 30))["message"]
             assert (reply["sender"], reply["content"]) == (handle, "ack")
@@ -112,7 +114,9 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             await asyncio.wait_for(asyncio.shield(first_task), 15)
             assert not (await sender.send_message("@gpt1", "offline", MessageMode.EXPLICIT))["delivered"]
             second_id, _ = await turn("@gpt2", "second survives")
-            third_id, _ = await turn("@gpt3", "third survives")
+            switched = await sender.request({"action": "set_model", "target": "gpt3", "model": "gpt-6.1-sol"})
+            assert switched["status"] == "ok"
+            third_id, _ = await turn("@gpt3", "third survives", "gpt-6.1-sol")
             assert len({original_id, second_id, third_id}) == 3
             recalled, _ = await start(None, session_id=original_id)
             duplicate = AgentLauncher("codex", "@other", uri, interactive=False, session_id=original_id)

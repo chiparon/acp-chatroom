@@ -19,7 +19,7 @@ from typing import Optional, Any
 
 from .agents import agent_registry
 from .client import ACPClient
-from .protocol import format_explicit_prompt, AgentStatus, EventType
+from .protocol import format_explicit_prompt, AgentStatus, EventType, valid_model_id
 from .terminal import keyboard_input
 
 if os.name == "nt":
@@ -95,6 +95,7 @@ class AgentLauncher:
 
         self.needs_claim = self.session is not None or not self.handle
         self.client = ACPClient(uri=self.uri, handle=None if self.needs_claim else self.handle)
+        self.client.supports_model_switch = bool(self.profile and self.profile.executable in {"codex", "claude", "agy"})
         self.pty_proc: Optional[Any] = None
         self.sub_proc: Optional[subprocess.Popen] = None
         self.last_output_time = time.time()
@@ -240,12 +241,18 @@ class AgentLauncher:
         self._running = True
         messages = queue.SimpleQueue()
         self.client.on(EventType.EXPLICIT_MESSAGE.value, messages.put)
+        if self.client.supports_model_switch:
+            self.client.on(EventType.SET_MODEL.value, messages.put)
 
         def inject_messages():
             for event in iter(messages.get, None):
                 if not self._running:
                     return
-                self.on_explicit_message(event)
+                if event.get("event") == EventType.SET_MODEL.value:
+                    if valid_model_id(event.get("model")):
+                        self.inject_prompt("/model " + event["model"])
+                else:
+                    self.on_explicit_message(event)
 
         injector = threading.Thread(target=inject_messages, daemon=True)
         watchdog = None

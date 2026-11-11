@@ -3,6 +3,7 @@ ACP (Agent Communication Protocol) - Protocol Definitions & Schemas
 """
 
 import json
+import re
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -21,6 +22,7 @@ class AgentStatus(str, Enum):
 
 
 class ActionType(str, Enum):
+    SET_MODEL = "set_model"
     CLAIM = "claim"
     REGISTER = "register"
     SEND = "send"
@@ -38,6 +40,7 @@ class SessionKey(NamedTuple):
 
 
 class EventType(str, Enum):
+    SET_MODEL = "set_model"
     EXPLICIT_MESSAGE = "explicit_message"
     SILENT_MESSAGE = "silent_message"
     PRESENCE_CHANGE = "presence_change"
@@ -47,6 +50,10 @@ class EventType(str, Enum):
 
 def get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def valid_model_id(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}", value) is not None
 
 
 @dataclass

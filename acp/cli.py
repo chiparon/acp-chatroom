@@ -3,6 +3,7 @@ ACP CLI - Unified Command-Line Interface for Hub, Launcher, Console, and Chat To
 """
 
 import sys
+import asyncio
 from pathlib import Path
 import click
 from rich.console import Console
@@ -11,7 +12,8 @@ from rich.table import Table
 from .hub import run_hub
 from .launcher import launch_agent
 from .console import start_console
-from .client import sync_send, sync_read, sync_roster
+from .client import ACPClient, sync_send, sync_read, sync_roster
+from .protocol import ActionType
 from .agents import agent_registry
 from .skills_generator import init_workspace_skills, install_skill
 
@@ -205,6 +207,22 @@ def roster_command(uri):
     except Exception as e:
         rich_console.print(f"[bold red]❌ Failed to get roster:[/bold red] {e}")
         sys.exit(1)
+
+
+@cli.command("model")
+@click.argument("model_id")
+@click.option("--to", "-t", "target", required=True, help="Online launcher handle")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")
+def model_command(model_id, target, uri):
+    """Send the native /model command to an idle agent with an empty composer."""
+    try:
+        result = asyncio.run(ACPClient(uri).request({"action": ActionType.SET_MODEL.value,
+                                                      "target": target, "model": model_id}))
+    except OSError as error:
+        raise click.ClickException(str(error)) from error
+    if result.get("status") != "ok":
+        raise click.ClickException(result.get("error", "Model command failed"))
+    click.echo(f"Sent model selection {model_id} to {target}")
 
 
 def main():

@@ -22,6 +22,9 @@ async def test_handle_owner_survives_conflicts_and_can_reconnect(tmp_path):
     owner.on(EventType.EXPLICIT_MESSAGE.value, inbox.put_nowait)
     try:
         await asyncio.gather(owner.connect(), other.connect())
+        for target, model in [("@gpt1", "some-model"), ("offline", "some-model"), ("@gpt1", "m\n/exit")]:
+            result = await other.request({"action": "set_model", "target": target, "model": model})
+            assert result["status"] == "error"
         with pytest.raises(ValueError, match="already online"):
             await duplicate.connect()
         assert duplicate.ws is None
