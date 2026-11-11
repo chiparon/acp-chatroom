@@ -25,6 +25,7 @@ class ACPClient:
         self.handle = handle if not handle or handle.startswith("@") else f"@{handle}"
         self.ws: Optional[WebSocketClientProtocol] = None
         self._pending_requests: Dict[str, asyncio.Future] = {}
+        self.supports_model_switch = False
         self._listener_task: Optional[asyncio.Task] = None
         self.event_handlers: Dict[str, List[Callable[[Dict[str, Any]], Any]]] = {
             EventType.EXPLICIT_MESSAGE.value: [],
@@ -144,6 +145,7 @@ class ACPClient:
             "handle": handle if handle.startswith("@") else f"@{handle}",
             "status": status.value if isinstance(status, AgentStatus) else status,
             "role": role,
+            "supports_model_switch": self.supports_model_switch,
         }
         result = await self.request(payload)
         if result.get("status") != "ok":

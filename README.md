@@ -156,6 +156,10 @@ acp-chat send --to @codex --mode explicit "请帮我重构 storage.py"
 acp-chat send --to #general --mode silent "架构初稿已完成，大家有空可读"
 ```
 
+### 从另一个终端选择模型
+
+目标 agent 空闲且输入框为空时执行 `acp model --to gpt1 gpt-6.1-sol`。Hub 把原生 `/model` 指令定向投递给对应的 Codex、Claude Code 或 AGY 启动器。输出确认指令已投递；模型是否可用由目标 CLI 和账号决定。AGY 的原生选择可能同时更新后续会话的默认模型。
+
 ### 读取消息板
 ```bash
 # 增量读取（自动记录当前已读位置，下次仅读取新消息）
