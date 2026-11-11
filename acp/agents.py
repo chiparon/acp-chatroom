@@ -3,7 +3,12 @@ from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
 import os
+import re
 import shutil
+import socket
+import uuid
+
+from .protocol import SessionKey
 
 
 @dataclass(frozen=True)
@@ -13,6 +18,24 @@ class AgentProfile:
     user_skills: str
     workspace_skills: str = ".agents/skills"
     permission_options: tuple[str, ...] = ()
+    resume_args: tuple[str, ...] = ()
+    config_env: str | None = None
+
+    def session_key(self, session_id: str) -> SessionKey:
+        if not self.resume_args:
+            raise ValueError(f"{self.executable} does not define a native resume command")
+        try:
+            session_id = str(uuid.UUID(session_id))
+        except ValueError:
+            if self.executable in {"codex", "claude"}:
+                raise ValueError(f"{self.executable} requires a native session UUID") from None
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", session_id):
+                raise ValueError("Expected a native session ID") from None
+        root = os.environ.get(self.config_env) if self.config_env else None
+        default_home = ".gemini/antigravity-cli" if self.executable == "agy" else f".{self.executable}"
+        root = root or (Path.home() / default_home)
+        return SessionKey(socket.gethostname().casefold(), self.executable,
+                          os.path.normcase(str(Path(root).expanduser().resolve())), session_id)
 
     def command(self, argv: list[str]) -> list[str]:
         # Preserve an explicitly selected executable path. A bare alias resolves via PATH.
@@ -33,14 +56,15 @@ class AgentProfile:
 
 def agent_registry() -> dict[str, AgentProfile]:
     claude = AgentProfile("claude", "--dangerously-skip-permissions", ".claude/skills", ".claude/skills",
-                          ("--permission-mode", "--restricted"))
+                          ("--permission-mode", "--restricted"), ("--resume",), "CLAUDE_CONFIG_DIR")
     agy = AgentProfile("agy", "--dangerously-skip-permissions", ".gemini/antigravity-cli/skills",
-                       permission_options=("--sandbox", "--mode"))
+                       permission_options=("--sandbox", "--mode"), resume_args=("--conversation",))
     profiles = {
         "claude": claude, "claudecode": claude,
         "agy": agy, "antigravity": agy,
         "codex": AgentProfile("codex", "--dangerously-bypass-approvals-and-sandbox", ".agents/skills",
-                              permission_options=("-s", "--sandbox", "-a", "--ask-for-approval", "--approve-for-me")),
+                              permission_options=("-s", "--sandbox", "-a", "--ask-for-approval", "--approve-for-me"),
+                              resume_args=("resume",), config_env="CODEX_HOME"),
     }
     for entry in entry_points(group="acp_chatroom.agents"):
         if entry.name in profiles:

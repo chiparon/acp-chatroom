@@ -15,6 +15,7 @@ from .protocol import (
     AgentStatus,
     ActionType,
     EventType,
+    SessionKey,
 )
 
 
@@ -50,6 +51,22 @@ class ACPClient:
         if self.ws:
             await self.ws.close()
             self.ws = None
+
+    @property
+    def connected(self) -> bool:
+        return self._listener_task is not None and not self._listener_task.done()
+
+    async def claim(self, harness: str, preferred: Optional[str], session: Optional[SessionKey]) -> dict:
+        # A one-shot request would release the reservation as soon as it returned.
+        if not self.connected:
+            raise RuntimeError("A claim requires a connected client")
+        result = await self.request({
+            "action": ActionType.CLAIM.value, "harness": harness, "handle": preferred,
+            "session": session._asdict() if session else None,
+        })
+        if result.get("status") != "ok":
+            raise ValueError(result.get("error", "Handle claim failed"))
+        return result
 
     def on(self, event_type: str, handler: Callable[[Dict[str, Any]], Any]) -> None:
         if event_type not in self.event_handlers:

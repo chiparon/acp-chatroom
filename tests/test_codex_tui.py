@@ -64,8 +64,8 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "local-test")
         processes = []
 
-        async def start(handle, command="codex"):
-            launcher = AgentLauncher(command, handle, uri, interactive=False)
+        async def start(handle, session_id=None):
+            launcher = AgentLauncher("codex", handle, uri, interactive=False, session_id=session_id)
             ready = Event()
             screen = []
 
@@ -114,13 +114,16 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             second_id, _ = await turn("@gpt2", "second survives")
             third_id, _ = await turn("@gpt3", "third survives")
             assert len({original_id, second_id, third_id}) == 3
-            await start("@recalled", f"codex resume {original_id}")
-            resumed_id, history = await turn("@recalled", "recall")
+            recalled, _ = await start(None, session_id=original_id)
+            duplicate = AgentLauncher("codex", "@other", uri, interactive=False, session_id=original_id)
+            await asyncio.wait_for(duplicate.run(), 5)
+            assert duplicate.pty_proc is None and duplicate.handle == recalled.handle
+            resumed_id, history = await turn(recalled.handle, "recall")
             assert resumed_id == original_id
             assert f"@tester: {marker}" in history
             roster = {r["handle"]: r["status"] for r in await sender.get_roster()}
             assert roster["@gpt1"] == "offline"
-            assert all(roster[h] in {"idle", "busy"} for h in ("@gpt2", "@gpt3", "@recalled"))
+            assert all(roster[h] in {"idle", "busy"} for h in ("@gpt2", "@gpt3", recalled.handle))
         finally:
             for launcher, task in processes:
                 launcher._running = False
