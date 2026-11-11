@@ -39,7 +39,7 @@ def hub_command(host, port, db):
 # -------------------------------------------------------------
 @cli.command("launch")
 @click.argument("command")
-@click.option("--as", "handle", required=True, help="Agent handle (e.g., @codex, @claudecode)")
+@click.option("--as", "--handle", "-a", "handle", required=True, help="Agent handle (e.g., @codex, claudecode)")
 @click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--idle-timeout", default=1.5, type=float, help="Seconds of output silence to mark as IDLE")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
@@ -59,7 +59,7 @@ def launch_command(command, handle, uri, idle_timeout, non_interactive):
 # -------------------------------------------------------------
 @cli.command("console")
 @click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
-@click.option("--as", "handle", default="@user", help="Your user handle")
+@click.option("--as", "--handle", "-a", "handle", default="@user", help="Your user handle")
 def console_command(uri, handle):
     """Open the human observer & interaction terminal."""
     start_console(uri=uri, handle=handle)
@@ -79,14 +79,18 @@ def init_skills_command(workspace):
 # 5. acp-chat / acp send, read, roster commands
 # -------------------------------------------------------------
 @cli.command("send")
-@click.option("--to", "target", required=True, help="Target handle (@agent) or topic (#topic)")
-@click.option("--mode", type=click.Choice(["explicit", "silent"]), default="silent", help="Message mode")
+@click.option("--to", "-t", "target", required=True, help="Target handle (@agent) or topic (#topic)")
+@click.option("--mode", "-m", type=click.Choice(["explicit", "silent"]), default="silent", help="Message mode")
 @click.option("--topic", default="general", help="Topic channel name")
 @click.option("--from", "sender", default=None, help="Sender handle (@name)")
 @click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.argument("content")
 def send_command(target, mode, topic, sender, uri, content):
     """Send an explicit prompt to an agent or a silent post to a topic."""
+    # Auto normalize target
+    if not target.startswith("#") and not target.startswith("@"):
+        target = f"@{target}"
+
     # Auto infer mode if target starts with @
     if target.startswith("@") and mode == "silent":
         mode = "explicit"
@@ -109,7 +113,7 @@ def send_command(target, mode, topic, sender, uri, content):
 
 @cli.command("read")
 @click.option("--topic", default="general", help="Topic channel name")
-@click.option("--as", "reader", default=None, help="Reader handle for cursor tracking")
+@click.option("--as", "--handle", "-a", "reader", default=None, help="Reader handle for cursor tracking")
 @click.option("--all", "read_all", is_flag=True, help="Read all messages (ignore unread cursor)")
 @click.option("--limit", default=20, type=int, help="Max messages to fetch")
 @click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
