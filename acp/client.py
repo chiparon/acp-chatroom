@@ -37,7 +37,11 @@ class ACPClient:
         # Start background receiver loop to demultiplex events and req_id responses
         self._listener_task = asyncio.create_task(self._reader_loop())
         if self.handle:
-            await self.register(self.handle, initial_status, role=role)
+            try:
+                await self.register(self.handle, initial_status, role=role)
+            except BaseException:
+                await self.close()
+                raise
 
     async def close(self) -> None:
         if self._listener_task:
@@ -118,14 +122,17 @@ class ACPClient:
                 await self.close()
 
     async def register(self, handle: str, status: AgentStatus = AgentStatus.IDLE, role: str = "agent") -> Dict[str, Any]:
-        self.handle = handle if handle.startswith("@") else f"@{handle}"
         payload = {
             "action": ActionType.REGISTER.value,
-            "handle": self.handle,
+            "handle": handle if handle.startswith("@") else f"@{handle}",
             "status": status.value if isinstance(status, AgentStatus) else status,
             "role": role,
         }
-        return await self.request(payload)
+        result = await self.request(payload)
+        if result.get("status") != "ok":
+            raise ValueError(result.get("error", "Registration failed"))
+        self.handle = result["handle"]
+        return result
 
     async def send_message(
         self,

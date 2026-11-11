@@ -25,6 +25,9 @@ class AgentProfile:
         flags = {arg.partition("=")[0] for arg in argv[1:]}
         has_policy = flags.intersection((self.access_flag, *self.permission_options))
         defaults = [] if has_policy else [self.access_flag]
+        # The shared Codex daemon runs shells with its starter's ACP handle and hub.
+        if self.executable == "codex" and not flags.intersection({"--no-daemon", "--remote"}):
+            defaults.append("--no-daemon")
         return [exe or selected, *defaults, *argv[1:]]
 
 
