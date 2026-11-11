@@ -75,12 +75,15 @@ class AgentLauncher:
                 raise ValueError(f"Unknown resume profile: {command}")
             self.session = self.profile.session_key(session_id)
             args.extend((*self.profile.resume_args, self.session.session_id))
-        elif self.profile and self.profile.resume_args and tuple(args[1:-1]) == self.profile.resume_args:
-            # Preserve the original launch syntax, including native pickers and named searches.
-            try:
-                self.session = self.profile.session_key(args[-1])
-            except ValueError:
-                pass
+        elif self.profile and self.profile.resume_args:
+            # Recognize the documented legacy command even with explicit launcher defaults.
+            defaults = {self.profile.access_flag, "--no-daemon"}
+            operation = tuple(arg for arg in args[1:-1] if arg not in defaults)
+            if operation == self.profile.resume_args:
+                try:
+                    self.session = self.profile.session_key(args[-1])
+                except ValueError:
+                    pass  # Native pickers and named searches have no stable ID at launch.
         if not handle and not self.profile:
             raise ValueError("Custom launch commands require --as HANDLE")
         self.argv = self.profile.command(args) if self.profile else args
@@ -256,6 +259,7 @@ class AgentLauncher:
                     return
                 if not shutil.which(self.argv[0]):
                     raise ValueError(f"Executable not found: {self.argv[0]}")
+                print(f"Starting {self.handle}", flush=True)
             # Register only after stdin is writable. A sender may act on presence immediately.
             reader = self._spawn()
             injector.start()
@@ -268,7 +272,6 @@ class AgentLauncher:
                     threading.Thread(target=self._user_input_reader, args=(read,), daemon=True).start()
                 if self.needs_claim:
                     await self.client.register(self.handle)
-                    print(f"Registered {self.handle}", flush=True)
                 else:
                     await self.client.connect(initial_status=AgentStatus.IDLE)
                 watchdog = asyncio.create_task(self._watchdog_loop())

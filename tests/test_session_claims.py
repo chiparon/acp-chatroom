@@ -32,6 +32,8 @@ def test_native_id_and_profile_scope(tmp_path, monkeypatch):
     native_id = str(uuid4())
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "a"))
     a = profile.session_key(native_id)
+    legacy = AgentLauncher(f"codex --no-daemon resume {native_id}", "gpt1")
+    assert legacy.session == a and legacy.needs_claim
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "b"))
     assert a != profile.session_key(native_id)
 
