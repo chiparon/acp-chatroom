@@ -137,7 +137,7 @@ class ACPHub:
             mode_str = data.get("mode", "silent")
             mode = MessageMode(mode_str)
             topic = data.get("topic", "general").strip()
-            content = data.get("content", "").strip()
+            content = data.get("content", "")
 
             msg = Message(
                 sender=sender,

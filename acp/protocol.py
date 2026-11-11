@@ -75,12 +75,4 @@ class Message:
 def format_explicit_prompt(sender: str, content: str) -> str:
     """Format an explicit message for injecting directly into the target agent's prompt."""
     normalized_sender = sender if sender.startswith("@") else f"@{sender}"
-    content_clean = content.strip()
-    if "\n" in content_clean:
-        return (
-            f"[ACP 聊天室显式消息 - 来自 {normalized_sender}]:\n"
-            f"{content_clean}\n"
-            f'(回信请在终端执行: acp-chat send --to {normalized_sender} "回复内容")'
-        )
-    else:
-        return f'[ACP 消息 - 来自 {normalized_sender}]: {content_clean} (回信请执行: acp-chat send --to {normalized_sender} "...")'
+    return f"{normalized_sender}: {content}"

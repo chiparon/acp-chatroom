@@ -1,43 +1,20 @@
 ---
 name: acp-chatroom
-description: Communicate with peer agents (Codex, Claude Code, etc.) and human operators via ACP Chatroom. Use when you need to send explicit instructions to another agent, check the shared message board, or check online roster.
+description: Use for a chatroom request beginning with @sender followed by a colon, for replying to a peer agent, or for reading or posting to a shared topic.
 ---
 
-# ACP Chatroom Skill (Antigravity)
+# ACP Chatroom
 
-You have access to the ACP Chatroom via the `acp-chat` command line tool in your shell.
+An incoming request starts with the sender's handle, for example `@reviewer: Check the migration`.
+Complete the task or ask for clarification by replying to that handle from your shell:
 
-## Available Actions
-
-### 1. Send Explicit Message (Direct Wakeup / Steering)
-Send a high-priority prompt directly to a specific agent to wake it up or guide its current task:
-```bash
-acp-chat send --to @codex --mode explicit "Please review the database migrations in storage.py"
+```sh
+acp-chat send --to "@reviewer" --mode explicit "The migration passed its tests."
 ```
 
-### 2. Read Silent Message Board (Passive Collaboration)
-Check for updates, announcements, or collaborative notes posted on the shared blackboard:
-```bash
-# Read unread messages from #general (automatically tracks your read cursor)
-acp-chat read --topic general
+Use the handle from the incoming request in place of `@reviewer`.
+The launcher supplies your handle and hub address to these commands.
 
-# Read all recent messages without filtering by unread
-acp-chat read --topic general --all
-```
-
-### 3. Post to Silent Message Board
-Post a status report, code summary, or artifact announcement that other agents can read whenever they are ready:
-```bash
-acp-chat send --to #general --mode silent "Refactoring of storage engine is complete. Unit tests passed."
-```
-
-### 4. Check Who Is Online
-View active agents and their current status (`IDLE` / `BUSY`):
-```bash
-acp-chat roster
-```
-
-## Communication Guidelines
-- When another agent sends you an explicit message, it will be injected into your prompt with `[ACP 聊天室显式消息 - 来自 @sender]`.
-- Always reply using `acp-chat send --to @sender --mode explicit "..."` when the task is finished or when you need clarification.
-- Use `silent` mode for non-urgent announcements so you do not interrupt other agents' ongoing tasks.
+- See the agents and their availability with `acp-chat roster`.
+- Read unread board messages with `acp-chat read --topic general`.
+- Post a board update with `acp-chat send --to "#general" --mode silent "Tests passed."`.

@@ -1,0 +1,33 @@
+name: Tests
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: UT and DT / ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.10', '3.12']
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install ".[test]"
+      - name: Unit tests
+        run: python -m pytest -q -m "not dt"
+      - name: Install Codex for the Windows TUI regression
+        if: runner.os == 'Windows' && matrix.python == '3.12'
+        run: npm install --global @openai/codex@0.167.1
+      - name: System tests with real hub, CLI and terminal
+        env:
+          ACP_TEST_CODEX: ${{ (runner.os == 'Windows' && matrix.python == '3.12') && '1' || '0' }}
+        run: python -m pytest -q -m dt
