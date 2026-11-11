@@ -51,10 +51,11 @@ class AgentLauncher:
     def __init__(
         self,
         command: str,
-        handle: str,
+        handle: Optional[str],
         uri: str = "ws://127.0.0.1:8765",
         idle_timeout: float = 1.5,
         interactive: bool = True,
+        session_id: Optional[str] = None,
     ):
         self.command = command
         registry = agent_registry()
@@ -68,14 +69,32 @@ class AgentLauncher:
             if executable.suffix.lower() in {".exe", ".cmd", ".bat"}:
                 name = executable.stem.lower()
         self.profile = registry.get(name)
+        self.session = None
+        if session_id is not None:
+            if not self.profile or len(args) != 1:
+                raise ValueError(f"Unknown resume profile: {command}")
+            self.session = self.profile.session_key(session_id)
+            args.extend((*self.profile.resume_args, self.session.session_id))
+        elif self.profile and self.profile.resume_args:
+            # Recognize the documented legacy command even with explicit launcher defaults.
+            defaults = {self.profile.access_flag, "--no-daemon"}
+            operation = tuple(arg for arg in args[1:-1] if arg not in defaults)
+            if operation == self.profile.resume_args:
+                try:
+                    self.session = self.profile.session_key(args[-1])
+                except ValueError:
+                    pass  # Native pickers and named searches have no stable ID at launch.
+        if not handle and not self.profile:
+            raise ValueError("Custom launch commands require --as HANDLE")
         self.argv = self.profile.command(args) if self.profile else args
         self.shell_command = subprocess.list2cmdline(self.argv) if self.profile else command
-        self.handle = handle if handle.startswith("@") else f"@{handle}"
+        self.handle = ("@" + handle.lstrip("@")) if handle else None
         self.uri = uri
         self.idle_timeout = idle_timeout
         self.interactive = interactive
 
-        self.client = ACPClient(uri=self.uri, handle=self.handle)
+        self.needs_claim = self.session is not None or not self.handle
+        self.client = ACPClient(uri=self.uri, handle=None if self.needs_claim else self.handle)
         self.pty_proc: Optional[Any] = None
         self.sub_proc: Optional[subprocess.Popen] = None
         self.last_output_time = time.time()
@@ -231,6 +250,16 @@ class AgentLauncher:
         injector = threading.Thread(target=inject_messages, daemon=True)
         watchdog = None
         try:
+            if self.needs_claim:
+                await self.client.connect()
+                result = await self.client.claim(self.profile.executable, self.handle, self.session)
+                self.handle = result["handle"]
+                if not result["claimed"]:
+                    print(f"{self.handle} is already {result['state']}", flush=True)
+                    return
+                if not shutil.which(self.argv[0]):
+                    raise ValueError(f"Executable not found: {self.argv[0]}")
+                print(f"Starting {self.handle}", flush=True)
             # Register only after stdin is writable. A sender may act on presence immediately.
             reader = self._spawn()
             injector.start()
@@ -241,12 +270,19 @@ class AgentLauncher:
                 threading.Thread(target=reader, daemon=True).start()
                 if read:
                     threading.Thread(target=self._user_input_reader, args=(read,), daemon=True).start()
-                await self.client.connect(initial_status=AgentStatus.IDLE)
+                if self.needs_claim:
+                    await self.client.register(self.handle)
+                else:
+                    await self.client.connect(initial_status=AgentStatus.IDLE)
                 watchdog = asyncio.create_task(self._watchdog_loop())
                 while self._running:
                     alive = self.pty_proc.isalive() if self.pty_proc else self.sub_proc.poll() is None
                     if not alive:
+                        if self.session and self.pty_proc.exitstatus:
+                            raise ValueError(f"Native resume exited with status {self.pty_proc.exitstatus}")
                         break
+                    if self.needs_claim and not self.client.connected:
+                        raise ConnectionError("Lost the Hub connection owning this handle")
                     await asyncio.sleep(0.1)
                 self._running = False
         finally:
@@ -270,10 +306,11 @@ class AgentLauncher:
 
 def launch_agent(
     command: str,
-    handle: str,
+    handle: Optional[str],
     uri: str = "ws://127.0.0.1:8765",
     idle_timeout: float = 1.5,
     interactive: bool = True,
+    session_id: Optional[str] = None,
 ) -> None:
     launcher = AgentLauncher(
         command=command,
@@ -281,5 +318,6 @@ def launch_agent(
         uri=uri,
         idle_timeout=idle_timeout,
         interactive=interactive,
+        session_id=session_id,
     )
     asyncio.run(launcher.run())

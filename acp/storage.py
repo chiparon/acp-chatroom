@@ -5,7 +5,7 @@ ACP Storage Engine - SQLite Persistence for Messages, Cursors & Roster
 import os
 import sqlite3
 from typing import List, Optional, Dict, Any
-from .protocol import Message, MessageMode, get_utc_now_iso
+from .protocol import Message, MessageMode, SessionKey, get_utc_now_iso
 
 
 class Storage:
@@ -57,6 +57,16 @@ class Storage:
                 handle TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
                 last_seen TEXT NOT NULL
+            )
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_handles (
+                host TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                handle TEXT NOT NULL,
+                PRIMARY KEY (host, harness, scope, session_id)
             )
             """)
             conn.commit()
@@ -196,7 +206,15 @@ class Storage:
         msgs.reverse()
         return msgs
 
-    def update_roster(self, handle: str, status: str) -> None:
+    def previous_handle(self, session: SessionKey) -> Optional[str]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT handle FROM session_handles WHERE host=? AND harness=? AND scope=? AND session_id=?",
+                session,
+            ).fetchone()
+            return row["handle"] if row else None
+
+    def update_roster(self, handle: str, status: str, session: Optional[SessionKey] = None) -> None:
         now = get_utc_now_iso()
         with self._get_connection() as conn:
             cursor = conn.cursor()
@@ -208,6 +226,11 @@ class Storage:
                 """,
                 (handle, status, now),
             )
+            if session:
+                conn.execute("""
+                    INSERT INTO session_handles (host, harness, scope, session_id, handle) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(host, harness, scope, session_id) DO UPDATE SET handle=excluded.handle
+                """, (*session, handle))
             conn.commit()
 
     def get_roster(self) -> List[Dict[str, Any]]:

@@ -108,19 +108,27 @@ acp launch "agy" --as @antigravity
 
 在三个终端分别运行 `acp launch codex --as gpt1`、`acp launch codex --as gpt2` 和 `acp launch codex --as gpt3`。每个进程独立注册。关闭 gpt1 后，gpt2 和 gpt3 仍可使用各自的名字收发消息。在线句柄不区分大小写，重名注册会报告冲突。
 
+已注册的 harness 可以省略 `--as`。例如在两个终端执行 `acp launch codex`，Hub 会分别分配 `@codex1`、`@codex2` 等句柄。启动器打印最终名字，也可用 `acp roster` 查看。
+
 本地托管的 Codex 需要支持 `--no-daemon` 的 CLI（CI 使用 0.167.1）。启动器自动传入此参数，使每个 agent 的 shell 继承自己的句柄和 Hub 地址。共用同一个 Codex 配置目录仍可访问历史会话。
 
 #### 将历史会话重新注册到聊天室
 
-在能访问原始会话的机器、账号及工作区下运行以下命令，把 `SESSION_ID` 替换为原生会话 ID，`recalled` 替换为一个空闲的聊天室名字：
+在能访问原始会话的机器、账号及工作区运行 `acp resume`。用原生会话 ID 替换 `SESSION_ID`（Codex 和 Claude Code 使用 UUID）。
 
 ```bash
-acp launch "codex resume SESSION_ID" --as recalled
-acp launch "claude --resume SESSION_ID" --as recalled
-acp launch "agy --conversation SESSION_ID" --as recalled
+acp resume codex SESSION_ID
+acp resume claude SESSION_ID --as reviewer
+acp resume agy SESSION_ID
 ```
 
-如果不知道 Codex 会话 ID，可运行 `acp launch "codex resume" --as recalled` 打开原生选择器。多进程场景请按 ID 或在选择器中明确选择会话。新句柄负责接收后续聊天室消息，原生会话的历史由对应的 harness 恢复。
+Hub 按机器名、harness、配置目录和原生 ID 识别会话。SQLite 保存上次按 ID 注册时使用的名字。首次召回旧版或从原生选择器启动的会话时，可用 `--as` 提供原名。直接传 ID 的旧命令（例如 `acp launch "codex resume SESSION_ID" --as reviewer`）也参与登记。
+
+- 会话离线时，Hub 依次尝试本次 `--as`、已记录的旧名、该 harness 的新编号。旧名已被占用时，原进程继续使用该名。
+- 同一会话正在启动或已在线时，再次召回会打印现有句柄和 `starting` 或 `online`，然后退出。只有取得预留的进程会启动原生 CLI。
+- 多个不同会话可同时召回。Hub 先预留名字，启动器将最终名字传给子进程，随后注册消息路由。连接断开即释放预留；用同一数据库重启 Hub 可恢复历史名字。
+
+如果不知道 Codex 会话 ID，可运行 `acp launch "codex resume" --as recalled` 打开原生选择器。自动去重适用于按原生 ID 发起的召回。
 
 ### 5. 启动人类交互监控大厅 (可选)
 打开一个终端作为人类观察员与调度员：

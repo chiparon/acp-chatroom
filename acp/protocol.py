@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional, Dict, Any, List
+from typing import NamedTuple, Optional, Dict, Any, List
 
 
 class MessageMode(str, Enum):
@@ -21,12 +21,20 @@ class AgentStatus(str, Enum):
 
 
 class ActionType(str, Enum):
+    CLAIM = "claim"
     REGISTER = "register"
     SEND = "send"
     READ = "read"
     ROSTER = "roster"
     PRESENCE = "presence"
     PING = "ping"
+
+
+class SessionKey(NamedTuple):
+    host: str
+    harness: str
+    scope: str
+    session_id: str
 
 
 class EventType(str, Enum):

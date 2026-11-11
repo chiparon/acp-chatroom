@@ -41,7 +41,7 @@ def hub_command(host, port, db):
 # -------------------------------------------------------------
 @cli.command("launch")
 @click.argument("command")
-@click.option("--as", "--handle", "-a", "handle", required=True, help="Agent handle (e.g., @codex, claudecode)")
+@click.option("--as", "--handle", "-a", "handle", help="Agent handle (profiles receive an automatic name if omitted)")
 @click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--idle-timeout", default=1.5, type=float, help="Seconds of output silence to mark as IDLE")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
@@ -55,7 +55,23 @@ def launch_command(command, handle, uri, idle_timeout, non_interactive):
             idle_timeout=idle_timeout,
             interactive=not non_interactive,
         )
-    except ValueError as exc:
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command("resume")
+@click.argument("agent")
+@click.argument("session_id")
+@click.option("--as", "--handle", "-a", "handle", help="Preferred chat handle, if available")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
+def resume_command(agent, session_id, handle, uri, non_interactive):
+    """Recall a native session by ID and register it with the Hub."""
+    if agent not in agent_registry():
+        raise click.BadParameter(f"Unknown agent {agent!r}. See 'acp agents'.", param_hint="AGENT")
+    try:
+        launch_agent(agent, handle, uri, interactive=not non_interactive, session_id=session_id)
+    except (ValueError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

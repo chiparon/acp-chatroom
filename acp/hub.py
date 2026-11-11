@@ -5,7 +5,8 @@ ACP Hub - Central WebSocket Server & Router for Multi-Agent Communication
 import asyncio
 import json
 import logging
-from typing import Dict, Any, Optional, Set
+import re
+from typing import Dict, Any, NamedTuple, Optional, Set
 import websockets
 from websockets.server import WebSocketServerProtocol, serve
 
@@ -15,10 +16,16 @@ from .protocol import (
     AgentStatus,
     ActionType,
     EventType,
+    SessionKey,
 )
 from .storage import Storage
 
 logger = logging.getLogger("acp.hub")
+
+
+class Claim(NamedTuple):
+    handle: str
+    session: Optional[SessionKey]
 
 
 class ACPHub:
@@ -28,6 +35,8 @@ class ACPHub:
         self.storage = Storage(db_path)
         self.clients: Dict[str, WebSocketServerProtocol] = {}  # norm_handle (lower) -> ws
         self.ws_to_handle: Dict[WebSocketServerProtocol, str] = {}  # ws -> handle
+        # Claims last for the owning socket's lifetime, including during native startup.
+        self.claims: Dict[WebSocketServerProtocol, Claim] = {}
         self.console_sockets: Set[WebSocketServerProtocol] = set()
         self.all_sockets: Set[WebSocketServerProtocol] = set()
         self.server = None
@@ -54,6 +63,7 @@ class ACPHub:
 
         try:
             async for raw_message in websocket:
+                req_id = None
                 try:
                     data = json.loads(raw_message)
                     action = data.get("action")
@@ -74,7 +84,7 @@ class ACPHub:
                     logger.exception(f"Error handling request: {e}")
                     await self._safe_send(
                         websocket,
-                        json.dumps({"event": EventType.ERROR.value, "error": str(e)}),
+                        json.dumps({"event": EventType.ERROR.value, "req_id": req_id, "error": str(e)}),
                     )
         except websockets.exceptions.ConnectionClosed:
             pass
@@ -82,6 +92,7 @@ class ACPHub:
             await self._cleanup_connection(websocket)
 
     async def _cleanup_connection(self, websocket: WebSocketServerProtocol) -> None:
+        self.claims.pop(websocket, None)
         self.all_sockets.discard(websocket)
         self.console_sockets.discard(websocket)
         handle = self.ws_to_handle.pop(websocket, None)
@@ -95,11 +106,55 @@ class ACPHub:
                 "status": AgentStatus.OFFLINE.value,
             })
 
+    def _claim(self, ws: WebSocketServerProtocol, data: dict) -> dict:
+        harness = data.get("harness")
+        if not isinstance(harness, str) or not re.fullmatch(r"[\w.-]+", harness):
+            raise ValueError("Expected a harness name")
+        session = None
+        if data.get("session") is not None:
+            session = SessionKey(**data["session"])
+            if session.harness != harness or not all(isinstance(v, str) and v for v in session):
+                raise ValueError("Invalid session identity")
+
+        if ws in self.ws_to_handle or ws in self.claims:
+            raise ValueError("Connection already has a registration or claim")
+        # No await between checking and reserving. Concurrent requests on this Hub
+        # cannot both win, even before the first launcher has spawned its process.
+        if session:
+            for owner, claim in self.claims.items():
+                if claim.session == session:
+                    state = "online" if owner in self.ws_to_handle else "starting"
+                    return {"status": "ok", "claimed": False, "handle": claim.handle, "state": state}
+
+        occupied = self.clients.keys() | {claim.handle.lower() for claim in self.claims.values()}
+        preferred = data.get("handle")
+        previous = self.storage.previous_handle(session) if session else None
+        for candidate in (preferred, previous):
+            if candidate:
+                handle = "@" + candidate.strip().lstrip("@")
+                if handle != "@" and handle.lower() not in occupied:
+                    break
+        else:
+            # Keep unused historical roster names available to returning sessions.
+            used = occupied | {row["handle"].lower() for row in self.storage.get_roster()}
+            number = 1
+            while f"@{harness}{number}".lower() in used:
+                number += 1
+            handle = f"@{harness}{number}"
+        self.claims[ws] = Claim(handle, session)
+        return {"status": "ok", "claimed": True, "handle": handle, "state": "starting"}
+
     async def process_action(
         self, websocket: WebSocketServerProtocol, action: Optional[str], data: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         if not action:
             return {"event": EventType.ERROR.value, "error": "Missing 'action' parameter"}
+
+        if action == ActionType.CLAIM.value:
+            try:
+                return self._claim(websocket, data)
+            except (TypeError, ValueError) as exc:
+                return {"status": "error", "error": str(exc)}
 
         # 1. REGISTER
         if action == ActionType.REGISTER.value:
@@ -110,20 +165,25 @@ class ACPHub:
             role = data.get("role", "agent")
 
             norm_handle = handle.lower()
+            claim = self.claims.get(websocket)
+            if claim and claim.handle.lower() != norm_handle:
+                return {"status": "error", "error": f"Connection reserved {claim.handle}"}
             owner = self.clients.get(norm_handle)
             if owner is not None and owner is not websocket:
                 return {"status": "error", "error": f"Handle {handle} is already online"}
+            if not claim and any(c.handle.lower() == norm_handle for c in self.claims.values()):
+                return {"status": "error", "error": f"Handle {handle} is already reserved"}
             registered = self.ws_to_handle.get(websocket)
             if registered and registered.lower() != norm_handle:
                 return {"status": "error", "error": f"Connection already registered as {registered}"}
             handle = registered or handle
+            self.storage.update_roster(handle, status, claim.session if claim else None)
             self.clients[norm_handle] = websocket
             self.ws_to_handle[websocket] = handle
 
             if role == "console" or norm_handle in ("@user", "@human", "@console", "@observer"):
                 self.console_sockets.add(websocket)
 
-            self.storage.update_roster(handle, status)
             logger.info(f"Registered {role}: {handle} (status: {status})")
 
             # Broadcast presence change
