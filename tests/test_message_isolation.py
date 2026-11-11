@@ -11,6 +11,41 @@ from acp.protocol import MessageMode, EventType
 pytestmark = pytest.mark.dt
 
 
+async def test_handle_owner_survives_conflicts_and_can_reconnect(tmp_path):
+    hub = ACPHub(port=0, db_path=str(tmp_path / "hub.db"))
+    await hub.start()
+    uri = f"ws://127.0.0.1:{hub.server.sockets[0].getsockname()[1]}"
+    owner = ACPClient(uri, "@gpt1")
+    duplicate = ACPClient(uri, "@GPT1")
+    other = ACPClient(uri, "@gpt2")
+    inbox = asyncio.Queue()
+    owner.on(EventType.EXPLICIT_MESSAGE.value, inbox.put_nowait)
+    try:
+        await asyncio.gather(owner.connect(), other.connect())
+        with pytest.raises(ValueError, match="already online"):
+            await duplicate.connect()
+        assert duplicate.ws is None
+        with pytest.raises(ValueError, match="already registered"):
+            await other.register("@gpt3")
+        assert other.handle == "@gpt2"
+        denied = await other.request({"action": "presence", "handle": "@gpt1", "status": "offline"})
+        assert denied["status"] == "error"
+        assert (await other.send_message("@GPT1", "original", MessageMode.EXPLICIT))["delivered"]
+        assert (await asyncio.wait_for(inbox.get(), 3))["message"]["content"] == "original"
+        await owner.close()
+        # Once cleanup completes the exact handle can be claimed by a new process.
+        async def wait_offline():
+            while "@gpt1" in hub.clients:
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(wait_offline(), 3)
+        await owner.connect()
+        assert (await other.send_message("@gpt1", "reconnected", MessageMode.EXPLICIT))["delivered"]
+        assert (await asyncio.wait_for(inbox.get(), 3))["message"]["content"] == "reconnected"
+    finally:
+        await asyncio.gather(owner.close(), duplicate.close(), other.close())
+        await hub.stop()
+
+
 async def test_explicit_message_isolation():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
         db_path = tf.name

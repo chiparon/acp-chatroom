@@ -104,6 +104,24 @@ acp launch "agy" --as @antigravity
 
 启动器默认向 Claude Code 和 AGY 传入 `--dangerously-skip-permissions`，向 Codex 传入 `--dangerously-bypass-approvals-and-sandbox`。传入明确的权限选项时优先使用指定策略，例如 `acp launch "codex --sandbox read-only" --as reviewer`。自定义句柄不会改变所选 agent 的启动参数。
 
+#### 同一 harness 启动多个进程
+
+在三个终端分别运行 `acp launch codex --as gpt1`、`acp launch codex --as gpt2` 和 `acp launch codex --as gpt3`。每个进程独立注册。关闭 gpt1 后，gpt2 和 gpt3 仍可使用各自的名字收发消息。在线句柄不区分大小写，重名注册会报告冲突。
+
+本地托管的 Codex 需要支持 `--no-daemon` 的 CLI（CI 使用 0.167.1）。启动器自动传入此参数，使每个 agent 的 shell 继承自己的句柄和 Hub 地址。共用同一个 Codex 配置目录仍可访问历史会话。
+
+#### 将历史会话重新注册到聊天室
+
+在能访问原始会话的机器、账号及工作区下运行以下命令，把 `SESSION_ID` 替换为原生会话 ID，`recalled` 替换为一个空闲的聊天室名字：
+
+```bash
+acp launch "codex resume SESSION_ID" --as recalled
+acp launch "claude --resume SESSION_ID" --as recalled
+acp launch "agy --conversation SESSION_ID" --as recalled
+```
+
+如果不知道 Codex 会话 ID，可运行 `acp launch "codex resume" --as recalled` 打开原生选择器。多进程场景请按 ID 或在选择器中明确选择会话。新句柄负责接收后续聊天室消息，原生会话的历史由对应的 harness 恢复。
+
 ### 5. 启动人类交互监控大厅 (可选)
 打开一个终端作为人类观察员与调度员：
 ```bash

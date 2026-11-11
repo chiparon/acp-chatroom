@@ -67,7 +67,7 @@ async def test_keyboard_and_direct_message_round_trip(tmp_path):
         event = await asyncio.wait_for(reply.get(), timeout=15)
         assert (event["message"]["sender"], event["message"]["content"]) == ("@worker", "received")
         flags, received = json.loads((tmp_path / "input.json").read_text("utf-8"))
-        assert flags == ["--dangerously-bypass-approvals-and-sandbox"]
+        assert flags == ["--dangerously-bypass-approvals-and-sandbox", "--no-daemon"]
         assert received == keyboard + "KEYS_DONE\x1b[200~@tester: " + content + "\x1b[201~\rEND_CAPTURE"
     finally:
         if launcher:

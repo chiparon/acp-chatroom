@@ -40,11 +40,13 @@ class ACPHub:
         if targets:
             await asyncio.gather(*[self._safe_send(ws, payload) for ws in targets], return_exceptions=True)
 
-    async def _safe_send(self, ws: WebSocketServerProtocol, payload: str) -> None:
+    async def _safe_send(self, ws: WebSocketServerProtocol, payload: str) -> bool:
         try:
             await ws.send(payload)
+            return True
         except Exception as e:
             logger.debug(f"Failed to send to client: {e}")
+            return False
 
     async def handle_connection(self, websocket: WebSocketServerProtocol) -> None:
         self.all_sockets.add(websocket)
@@ -83,7 +85,7 @@ class ACPHub:
         self.all_sockets.discard(websocket)
         self.console_sockets.discard(websocket)
         handle = self.ws_to_handle.pop(websocket, None)
-        if handle:
+        if handle and self.clients.get(handle.lower()) is websocket:
             self.clients.pop(handle.lower(), None)
             self.storage.update_roster(handle, AgentStatus.OFFLINE.value)
             logger.info(f"Agent {handle} disconnected and marked offline")
@@ -108,6 +110,13 @@ class ACPHub:
             role = data.get("role", "agent")
 
             norm_handle = handle.lower()
+            owner = self.clients.get(norm_handle)
+            if owner is not None and owner is not websocket:
+                return {"status": "error", "error": f"Handle {handle} is already online"}
+            registered = self.ws_to_handle.get(websocket)
+            if registered and registered.lower() != norm_handle:
+                return {"status": "error", "error": f"Connection already registered as {registered}"}
+            handle = registered or handle
             self.clients[norm_handle] = websocket
             self.ws_to_handle[websocket] = handle
 
@@ -155,14 +164,13 @@ class ACPHub:
                 target_ws = self.clients.get(norm_target.lower())
                 delivered = False
                 if target_ws and not target_ws.closed:
-                    await self._safe_send(
+                    delivered = await self._safe_send(
                         target_ws,
                         json.dumps({
                             "event": EventType.EXPLICIT_MESSAGE.value,
                             "message": msg_dict,
                         }),
                     )
-                    delivered = True
 
                 # Forward ONLY to human consoles for observation (NEVER to peer agents!)
                 if self.console_sockets:
@@ -219,17 +227,17 @@ class ACPHub:
 
         # 5. PRESENCE
         elif action == ActionType.PRESENCE.value:
-            handle = data.get("handle") or self.ws_to_handle.get(websocket)
+            handle = self.ws_to_handle.get(websocket)
+            requested = data.get("handle") or handle
+            if not handle or requested.lstrip("@").lower() != handle[1:].lower():
+                return {"status": "error", "error": "Presence requires the registered handle"}
             status = data.get("status", AgentStatus.IDLE.value)
-            if handle:
-                if not handle.startswith("@"):
-                    handle = f"@{handle}"
-                self.storage.update_roster(handle, status)
-                await self.broadcast_event({
-                    "event": EventType.PRESENCE_CHANGE.value,
-                    "handle": handle,
-                    "status": status,
-                })
+            self.storage.update_roster(handle, status)
+            await self.broadcast_event({
+                "event": EventType.PRESENCE_CHANGE.value,
+                "handle": handle,
+                "status": status,
+            })
             return {"status": "ok", "action": "presence"}
 
         # 6. PING

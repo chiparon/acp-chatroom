@@ -21,12 +21,13 @@ from acp.protocol import format_explicit_prompt
 def test_bare_launch_uses_registered_defaults(name, executable, flag):
     launcher = AgentLauncher(name, "@custom")
     assert Path(launcher.argv[0]).stem.lower() == executable
-    assert launcher.argv[1:] == [flag]
+    assert launcher.argv[1:] == ([flag, "--no-daemon"] if name == "codex" else [flag])
 
 
 def test_custom_command_preserves_arguments():
     launcher = AgentLauncher('codex --sandbox read-only', "@worker")
-    assert launcher.argv[1:] == ["--sandbox", "read-only"]
+    assert launcher.argv[1:] == ["--no-daemon", "--sandbox", "read-only"]
+    assert AgentLauncher("codex --no-daemon", "gpt2").argv.count("--no-daemon") == 1
     assert AgentLauncher("claude --continue", "@worker").argv[1:] == ["--dangerously-skip-permissions", "--continue"]
 
 

@@ -47,13 +47,16 @@ def hub_command(host, port, db):
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
 def launch_command(command, handle, uri, idle_timeout, non_interactive):
     """Launch and wrap an agent process in ConPTY with automatic prompt injection."""
-    launch_agent(
-        command=command,
-        handle=handle,
-        uri=uri,
-        idle_timeout=idle_timeout,
-        interactive=not non_interactive,
-    )
+    try:
+        launch_agent(
+            command=command,
+            handle=handle,
+            uri=uri,
+            idle_timeout=idle_timeout,
+            interactive=not non_interactive,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 # -------------------------------------------------------------
@@ -74,7 +77,8 @@ def console_command(uri, handle):
 def agents_command():
     """List installed agent profiles and their default launch arguments."""
     for name, profile in agent_registry().items():
-        click.echo(f"{name}: {profile.executable} {profile.access_flag}")
+        flags = profile.command([name])[1:]
+        click.echo(f"{name}: {profile.executable} {' '.join(flags)}")
 
 
 @cli.command("install")
