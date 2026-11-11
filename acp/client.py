@@ -32,12 +32,12 @@ class ACPClient:
             "any": [],
         }
 
-    async def connect(self, initial_status: AgentStatus = AgentStatus.IDLE) -> None:
+    async def connect(self, initial_status: AgentStatus = AgentStatus.IDLE, role: str = "agent") -> None:
         self.ws = await websockets.connect(self.uri)
         # Start background receiver loop to demultiplex events and req_id responses
         self._listener_task = asyncio.create_task(self._reader_loop())
         if self.handle:
-            await self.register(self.handle, initial_status)
+            await self.register(self.handle, initial_status, role=role)
 
     async def close(self) -> None:
         if self._listener_task:
@@ -117,12 +117,13 @@ class ACPClient:
             if should_close:
                 await self.close()
 
-    async def register(self, handle: str, status: AgentStatus = AgentStatus.IDLE) -> Dict[str, Any]:
+    async def register(self, handle: str, status: AgentStatus = AgentStatus.IDLE, role: str = "agent") -> Dict[str, Any]:
         self.handle = handle if handle.startswith("@") else f"@{handle}"
         payload = {
             "action": ActionType.REGISTER.value,
             "handle": self.handle,
             "status": status.value if isinstance(status, AgentStatus) else status,
+            "role": role,
         }
         return await self.request(payload)
 

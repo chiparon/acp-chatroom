@@ -26,8 +26,9 @@ class ACPHub:
         self.host = host
         self.port = port
         self.storage = Storage(db_path)
-        self.clients: Dict[str, WebSocketServerProtocol] = {}  # handle -> ws
+        self.clients: Dict[str, WebSocketServerProtocol] = {}  # norm_handle (lower) -> ws
         self.ws_to_handle: Dict[WebSocketServerProtocol, str] = {}  # ws -> handle
+        self.console_sockets: Set[WebSocketServerProtocol] = set()
         self.all_sockets: Set[WebSocketServerProtocol] = set()
         self.server = None
         self._running = False
@@ -80,9 +81,10 @@ class ACPHub:
 
     async def _cleanup_connection(self, websocket: WebSocketServerProtocol) -> None:
         self.all_sockets.discard(websocket)
+        self.console_sockets.discard(websocket)
         handle = self.ws_to_handle.pop(websocket, None)
         if handle:
-            self.clients.pop(handle, None)
+            self.clients.pop(handle.lower(), None)
             self.storage.update_roster(handle, AgentStatus.OFFLINE.value)
             logger.info(f"Agent {handle} disconnected and marked offline")
             await self.broadcast_event({
@@ -103,12 +105,17 @@ class ACPHub:
             if not handle.startswith("@"):
                 handle = f"@{handle}"
             status = data.get("status", AgentStatus.IDLE.value)
+            role = data.get("role", "agent")
 
-            # Record handle mapping
-            self.clients[handle] = websocket
+            norm_handle = handle.lower()
+            self.clients[norm_handle] = websocket
             self.ws_to_handle[websocket] = handle
+
+            if role == "console" or norm_handle in ("@user", "@human", "@console", "@observer"):
+                self.console_sockets.add(websocket)
+
             self.storage.update_roster(handle, status)
-            logger.info(f"Registered agent: {handle} (status: {status})")
+            logger.info(f"Registered {role}: {handle} (status: {status})")
 
             # Broadcast presence change
             await self.broadcast_event(
@@ -143,9 +150,9 @@ class ACPHub:
             msg_dict = saved.to_dict()
 
             if mode == MessageMode.EXPLICIT:
-                # Direct route to target agent
+                # Direct route ONLY to the targeted agent
                 norm_target = target if target.startswith("@") else f"@{target}"
-                target_ws = self.clients.get(norm_target)
+                target_ws = self.clients.get(norm_target.lower())
                 delivered = False
                 if target_ws and not target_ws.closed:
                     await self._safe_send(
@@ -157,15 +164,17 @@ class ACPHub:
                     )
                     delivered = True
 
-                # Also broadcast to human consoles/listeners for visibility
-                await self.broadcast_event(
-                    {
+                # Forward ONLY to human consoles for observation (NEVER to peer agents!)
+                if self.console_sockets:
+                    payload = json.dumps({
                         "event": EventType.EXPLICIT_MESSAGE.value,
                         "message": msg_dict,
                         "delivered": delivered,
-                    },
-                    exclude=target_ws,
-                )
+                    })
+                    console_targets = [ws for ws in self.console_sockets if ws != target_ws and ws != websocket]
+                    if console_targets:
+                        await asyncio.gather(*[self._safe_send(ws, payload) for ws in console_targets], return_exceptions=True)
+
                 return {
                     "status": "ok",
                     "action": "send",

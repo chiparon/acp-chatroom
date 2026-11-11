@@ -90,7 +90,7 @@ class HumanConsole:
         self.print_banner()
 
         try:
-            await self.client.connect(initial_status=AgentStatus.IDLE)
+            await self.client.connect(initial_status=AgentStatus.IDLE, role="console")
         except Exception as e:
             console.print(f"[bold red]❌ Failed to connect to ACP Hub at {self.uri}: {e}[/bold red]")
             return

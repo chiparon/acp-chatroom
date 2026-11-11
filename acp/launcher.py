@@ -63,6 +63,13 @@ class AgentLauncher:
     def on_explicit_message(self, event_data: dict) -> None:
         """Callback when an explicit message arrives for this agent from ACP Hub."""
         msg = event_data.get("message", {})
+        target = msg.get("target", "").strip()
+        norm_target = target if target.startswith("@") else f"@{target}"
+
+        # CRITICAL ROUTING CHECK: Ensure this message was actually addressed to this agent!
+        if norm_target.lower() != self.handle.lower():
+            return
+
         sender = msg.get("sender", "@unknown")
         content = msg.get("content", "")
 
