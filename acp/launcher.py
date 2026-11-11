@@ -4,39 +4,47 @@ Enables automatic prompt injection and Idle/Busy presence reporting.
 """
 
 import asyncio
+from contextlib import ExitStack
 import os
-import sys
-import time
-import threading
+import queue
+import re
+import shlex
+import shutil
 import subprocess
-from typing import Optional, List, Any
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Optional, Any
 
-try:
-    from winpty import PtyProcess
-    HAS_WINPTY = True
-except ImportError:
-    HAS_WINPTY = False
-
-from .protocol import format_explicit_prompt, AgentStatus, EventType
+from .agents import agent_registry
 from .client import ACPClient
+from .protocol import format_explicit_prompt, AgentStatus, EventType
+from .terminal import keyboard_input
+
+if os.name == "nt":
+    from winpty import PtyProcess
+else:
+    from ptyprocess import PtyProcessUnicode as PtyProcess
 
 
-SPECIAL_KEY_MAP = {
-    # Arrow keys
-    'H': '\x1b[A',  # Up
-    'P': '\x1b[B',  # Down
-    'M': '\x1b[C',  # Right
-    'K': '\x1b[D',  # Left
-    # Navigation
-    'G': '\x1b[H',  # Home
-    'O': '\x1b[F',  # End
-    'I': '\x1b[5~', # Page Up
-    'Q': '\x1b[6~', # Page Down
-    'S': '\x1b[3~', # Delete
-    'R': '\x1b[2~', # Insert
-    # Tab / Backtab
-    '\x0f': '\x1b[Z', # Shift+Tab
-}
+def split_command(command: str) -> list[str]:
+    if os.name != "nt":
+        return shlex.split(command)
+    # ConPTY accepts argv. Use Windows quoting rules for paths and empty arguments.
+    import ctypes
+    from ctypes import wintypes
+
+    split = ctypes.windll.shell32.CommandLineToArgvW
+    split.restype = ctypes.POINTER(wintypes.LPWSTR)
+    count = ctypes.c_int()
+    argv = split(command, ctypes.byref(count))
+    if not argv:
+        raise ctypes.WinError()
+    try:
+        return argv[:count.value]
+    finally:
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(argv, ctypes.c_void_p))
 
 
 class AgentLauncher:
@@ -49,6 +57,19 @@ class AgentLauncher:
         interactive: bool = True,
     ):
         self.command = command
+        registry = agent_registry()
+        if not command.strip():
+            raise ValueError("Agent command is empty")
+        args = split_command(command.strip())
+        executable = Path(args[0])
+        name = executable.name
+        if os.name == "nt":
+            name = name.lower()
+            if executable.suffix.lower() in {".exe", ".cmd", ".bat"}:
+                name = executable.stem.lower()
+        self.profile = registry.get(name)
+        self.argv = self.profile.command(args) if self.profile else args
+        self.shell_command = subprocess.list2cmdline(self.argv) if self.profile else command
         self.handle = handle if handle.startswith("@") else f"@{handle}"
         self.uri = uri
         self.idle_timeout = idle_timeout
@@ -65,34 +86,34 @@ class AgentLauncher:
     def write_raw(self, text: str) -> None:
         """Write raw characters directly into the terminal stream."""
         with self._lock:
-            if self.pty_proc and self.pty_proc.isalive():
-                self.pty_proc.write(text)
-            elif self.sub_proc and self.sub_proc.poll() is None:
-                if self.sub_proc.stdin:
-                    self.sub_proc.stdin.write(text.encode("utf-8", errors="ignore"))
-                    self.sub_proc.stdin.flush()
+            self._write(text)
+
+    def _write(self, text: str) -> None:
+        if self.pty_proc and self.pty_proc.isalive():
+            self.pty_proc.write(text)
+        elif self.sub_proc and self.sub_proc.stdin and self.sub_proc.poll() is None:
+            self.sub_proc.stdin.write(text.encode("utf-8"))
+            self.sub_proc.stdin.flush()
 
     def write_input(self, text: str) -> None:
-        """Write text with proper line endings into the agent process."""
-        if not text.endswith("\r\n") and not text.endswith("\r") and not text.endswith("\n"):
-            text += "\r"
-        elif text.endswith("\n") and not text.endswith("\r"):
-            text = text[:-1] + "\r"
-        self.write_raw(text)
+        ending = "\r" if self.pty_proc else "\n"
+        self.write_raw(text.rstrip("\r\n") + ending)
 
     def inject_prompt(self, text: str) -> None:
-        """Inject explicit prompt into agent TUI and trigger execution without mangling screen."""
-        clean = text.strip()
-        # 1. Write the clean prompt into the terminal input buffer
-        self.write_raw(clean)
-        # 2. Brief sleep (80ms) for TUI paste buffer to settle
-        time.sleep(0.08)
-        # 3. Send Carriage Return (\r) to trigger execution/submission
-        self.write_raw("\r")
-        # 4. If multiline, send an extra \r in case editor is in multiline state
-        if "\n" in clean:
-            time.sleep(0.08)
-            self.write_raw("\r")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        # Keep message content from terminating a paste or issuing terminal controls.
+        text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", text)
+        if self.profile and self.pty_proc:
+            # One editor paste and one Enter, including for multiline messages.
+            with self._lock:
+                self._write(f"\x1b[200~{text}\x1b[201~")
+                # Codex on ConPTY folds an immediate Enter into its paste burst.
+                # Keep operator input out of the editor until this turn is submitted.
+                if os.name == "nt" and self.profile.executable == "codex":
+                    time.sleep(0.3)
+                self._write("\r")
+        else:
+            self.write_input(text)
 
     def on_explicit_message(self, event_data: dict) -> None:
         """Callback when an explicit message arrives for this agent from ACP Hub."""
@@ -107,14 +128,13 @@ class AgentLauncher:
         sender = msg.get("sender", "@unknown")
         content = msg.get("content", "")
 
-        # Format prompt with source tag and instructions
         formatted_prompt = format_explicit_prompt(sender, content)
 
         # Inject into agent's terminal stdin cleanly (do NOT print to sys.stdout to prevent TUI distortion)
         self.inject_prompt(formatted_prompt)
 
-    def _output_reader_winpty(self) -> None:
-        """Read output from ConPTY and stream to stdout."""
+    def _output_reader_pty(self) -> None:
+        """Read output from the child PTY and stream to stdout."""
         while self._running and self.pty_proc and self.pty_proc.isalive():
             try:
                 chunk = self.pty_proc.read()
@@ -143,59 +163,14 @@ class AgentLauncher:
             except Exception:
                 break
 
-    def _user_input_reader(self) -> None:
-        """Forward local human keyboard input into the agent process with full raw key support."""
-        if os.name == "nt":
-            import msvcrt
-            while self._running:
-                try:
-                    if msvcrt.kbhit():
-                        ch = msvcrt.getwch()
-                        if ch in ('\x00', '\xe0'):
-                            # Special key scan code follows (arrows, home, end, etc.)
-                            code = msvcrt.getwch()
-                            seq = SPECIAL_KEY_MAP.get(code)
-                            if seq:
-                                self.write_raw(seq)
-                        elif ch == '\r':
-                            self.write_raw('\r')
-                        elif ch == '\x08':
-                            self.write_raw('\x08')
-                        elif ch == '\x03':
-                            # Ctrl+C
-                            self.write_raw('\x03')
-                        elif ch == '\x04':
-                            # Ctrl+D
-                            self.write_raw('\x04')
-                        elif ch == '\x1b':
-                            # Escape
-                            self.write_raw('\x1b')
-                        elif ch == '\t':
-                            self.write_raw('\t')
-                        else:
-                            self.write_raw(ch)
-                    else:
-                        time.sleep(0.01)
-                except Exception:
-                    break
-        else:
-            # Unix raw mode
-            import tty
-            import termios
-            import select
-            old_settings = termios.tcgetattr(sys.stdin)
+    def _user_input_reader(self, read) -> None:
+        while self._running:
             try:
-                tty.setraw(sys.stdin.fileno())
-                while self._running:
-                    r, _, _ = select.select([sys.stdin], [], [], 0.05)
-                    if r:
-                        ch = sys.stdin.read(1)
-                        if ch:
-                            self.write_raw(ch)
-            except Exception:
-                pass
-            finally:
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+                chunk = read()
+                if chunk and self._running:
+                    self.write_raw(chunk)
+            except (EOFError, OSError):
+                break
 
     async def _watchdog_loop(self) -> None:
         """Watchdog to update presence status between IDLE and BUSY."""
@@ -218,72 +193,79 @@ class AgentLauncher:
                         pass
             await asyncio.sleep(0.5)
 
+    def _spawn(self):
+        env = {**os.environ, "ACP_AGENT_HANDLE": self.handle, "ACP_HUB_URI": self.uri}
+        if self.profile or os.name == "nt" or self.interactive:
+            if env.get("TERM", "dumb") == "dumb":
+                env["TERM"] = "xterm-256color"
+            size = shutil.get_terminal_size()
+            argv = self.argv
+            if os.name == "nt":
+                executable = shutil.which(argv[0])
+                if not executable or executable.lower().endswith((".cmd", ".bat")):
+                    # Let cmd expand the command after /c parsing, preserving quoted paths.
+                    env["ACP_LAUNCH_COMMAND"] = self.shell_command
+                    argv = ["cmd.exe", "/d", "/s", "/c", "%ACP_LAUNCH_COMMAND%"]
+            elif not self.profile:
+                argv = ["/bin/sh", "-c", self.command]
+            self.pty_proc = PtyProcess.spawn(argv, env=env, dimensions=(size.lines, size.columns))
+            return self._output_reader_pty
+
+        self.sub_proc = subprocess.Popen(
+            self.command, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, env=env,
+        )
+        return self._output_reader_subprocess
+
     async def run(self) -> None:
         self._running = True
-        print(f"🔗 [ACP Launcher] Connecting {self.handle} to ACP Hub ({self.uri}) ...")
-        await self.client.connect(initial_status=AgentStatus.IDLE)
+        messages = queue.SimpleQueue()
+        self.client.on(EventType.EXPLICIT_MESSAGE.value, messages.put)
 
-        # Register explicit message event handler
-        self.client.on(EventType.EXPLICIT_MESSAGE.value, self.on_explicit_message)
-        print(f"✅ [ACP Launcher] {self.handle} registered on ACP Hub. Listening for messages.")
+        def inject_messages():
+            for event in iter(messages.get, None):
+                if not self._running:
+                    return
+                self.on_explicit_message(event)
 
-        # Spawn the child process
-        print(f"🚀 [ACP Launcher] Spawning agent process: '{self.command}'")
-        use_winpty = HAS_WINPTY and os.name == "nt"
-
-        if use_winpty:
-            try:
-                # Direct WinPTY spawn
-                self.pty_proc = PtyProcess.spawn(self.command)
-                reader_thread = threading.Thread(target=self._output_reader_winpty, daemon=True)
-            except Exception as e:
-                # If direct spawn fails (e.g. built-in cmd commands), try with cmd.exe /c wrapped in outer quotes
-                try:
-                    self.pty_proc = PtyProcess.spawn(f'cmd.exe /c "{self.command}"')
-                    reader_thread = threading.Thread(target=self._output_reader_winpty, daemon=True)
-                except Exception as e2:
-                    print(f"⚠️ [ACP Launcher] WinPTY spawn failed ({e2}), falling back to subprocess.")
-                    use_winpty = False
-
-        if not use_winpty:
-            self.sub_proc = subprocess.Popen(
-                self.command,
-                shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            reader_thread = threading.Thread(target=self._output_reader_subprocess, daemon=True)
-
-        reader_thread.start()
-
-        # Start interactive keyboard forwarding if enabled
-        if self.interactive:
-            input_thread = threading.Thread(target=self._user_input_reader, daemon=True)
-            input_thread.start()
-
-        # Start watchdog loop
-        watchdog_task = asyncio.create_task(self._watchdog_loop())
-
+        injector = threading.Thread(target=inject_messages, daemon=True)
+        watchdog = None
         try:
-            while self._running:
-                is_alive = (
-                    (self.pty_proc and self.pty_proc.isalive())
-                    if use_winpty
-                    else (self.sub_proc and self.sub_proc.poll() is None)
-                )
-                if not is_alive:
-                    print("\n🛑 [ACP Launcher] Agent child process terminated.")
-                    break
-                await asyncio.sleep(0.2)
+            # Register only after stdin is writable. A sender may act on presence immediately.
+            reader = self._spawn()
+            injector.start()
+            with ExitStack() as stack:
+                read = None
+                if self.interactive and sys.stdin.isatty():
+                    read = stack.enter_context(keyboard_input())
+                threading.Thread(target=reader, daemon=True).start()
+                if read:
+                    threading.Thread(target=self._user_input_reader, args=(read,), daemon=True).start()
+                await self.client.connect(initial_status=AgentStatus.IDLE)
+                watchdog = asyncio.create_task(self._watchdog_loop())
+                while self._running:
+                    alive = self.pty_proc.isalive() if self.pty_proc else self.sub_proc.poll() is None
+                    if not alive:
+                        break
+                    await asyncio.sleep(0.1)
+                self._running = False
         finally:
             self._running = False
-            watchdog_task.cancel()
+            messages.put(None)
+            if injector.is_alive():
+                await asyncio.to_thread(injector.join)
+            if watchdog:
+                watchdog.cancel()
+                await asyncio.gather(watchdog, return_exceptions=True)
             await self.client.close()
-            if self.pty_proc and self.pty_proc.isalive():
-                self.pty_proc.close()
-            elif self.sub_proc and self.sub_proc.poll() is None:
-                self.sub_proc.terminate()
+            if self.pty_proc:
+                self.pty_proc.close(force=True)
+            elif self.sub_proc:
+                if self.sub_proc.poll() is None:
+                    self.sub_proc.terminate()
+                self.sub_proc.wait()
+                self.sub_proc.stdin.close()
+                self.sub_proc.stdout.close()
 
 
 def launch_agent(

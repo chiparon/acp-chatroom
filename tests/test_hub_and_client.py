@@ -1,3 +1,5 @@
+import pytest
+
 import asyncio
 import os
 import tempfile
@@ -6,15 +8,18 @@ from acp.client import ACPClient
 from acp.protocol import MessageMode, AgentStatus, EventType
 
 
-async def run_hub_and_client_test():
+pytestmark = pytest.mark.dt
+
+
+async def test_hub_and_client():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
         db_path = tf.name
 
-    hub = ACPHub(host="127.0.0.1", port=18765, db_path=db_path)
+    hub = ACPHub(host="127.0.0.1", port=0, db_path=db_path)
     await hub.start()
 
     try:
-        uri = "ws://127.0.0.1:18765"
+        uri = f"ws://127.0.0.1:{hub.server.sockets[0].getsockname()[1]}"
 
         # Client 1: @antigravity
         c1 = ACPClient(uri=uri, handle="@antigravity")
@@ -93,4 +98,4 @@ async def run_hub_and_client_test():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_hub_and_client_test())
+    asyncio.run(test_hub_and_client())

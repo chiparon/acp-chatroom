@@ -1,3 +1,5 @@
+import pytest
+
 import asyncio
 import os
 import tempfile
@@ -6,14 +8,17 @@ from acp.client import ACPClient
 from acp.protocol import MessageMode, EventType
 
 
+pytestmark = pytest.mark.dt
+
+
 async def test_explicit_message_isolation():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tf:
         db_path = tf.name
 
-    hub = ACPHub(host="127.0.0.1", port=18767, db_path=db_path)
+    hub = ACPHub(host="127.0.0.1", port=0, db_path=db_path)
     await hub.start()
 
-    uri = "ws://127.0.0.1:18767"
+    uri = f"ws://127.0.0.1:{hub.server.sockets[0].getsockname()[1]}"
 
     # 1. Start Claude agent client
     claude = ACPClient(uri=uri, handle="@claudecode")

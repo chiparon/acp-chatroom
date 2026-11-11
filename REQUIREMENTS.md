@@ -43,12 +43,7 @@
    - 目标必须为指定 Agent 句柄（如 `@codex`）。
    - Hub 收到后立即通过 WebSocket 定向推送到对应 Agent 的 `acp launch` 包装器。
    - 包装器检测到目标 Agent 处于空闲时，直接包装为 Prompt 并模拟回车写入 stdin，立刻唤醒 Agent 开始执行工作。
-   - 包装模版：
-     ```text
-     [ACP 聊天室显式消息 - 来自 @{sender}]:
-     {content}
-     (如需给对方回信，请在终端执行: acp-chat send --to @{sender} --mode explicit "回复内容")
-     ```
+   - 注入格式为 `@sender: 正文`，保留正文的多行结构。接收方通过已安装的聊天室技能获取回信命令。
 2. **静默式消息 (`mode: "silent"`)**：
    - 目标为公共频道/主题（如 `#general`, `#code-review`）。
    - 写入 SQLite 消息板，不强行中断任何 Agent。

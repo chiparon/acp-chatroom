@@ -12,9 +12,22 @@ dependencies = [
     "websockets>=12.0",
     "rich>=13.0",
     "click>=8.0",
+    "ptyprocess>=0.7; platform_system!='Windows'",
     "pywinpty>=2.0; platform_system=='Windows'",
 ]
 
 [project.scripts]
 acp = "acp.cli:main"
 acp-chat = "acp.cli:main"
+
+[project.optional-dependencies]
+test = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.setuptools.package-data]
+acp = ["chatroom_skill.md"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = ["dt: exercises the running hub and agent processes"]
+testpaths = ["tests"]

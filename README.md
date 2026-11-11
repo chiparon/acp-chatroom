@@ -64,15 +64,22 @@ cd chatroom
 pip install -e .
 ```
 
-### 2. 初始化 Agent 技能与规则
-在当前工作区一键生成三大平台的技能配置：
+### 2. 按 agent 安装聊天室技能
+
+在运行 agent 的机器上安装本项目，然后选择对应的配置。每个命令只安装该 agent 的用户级技能，重启会话后即可发现：
+
 ```bash
-acp init-skills
+acp agents
+acp install codex
+acp install claude
+acp install agy
 ```
-执行后会在当前目录生成：
-- `.agents/skills/acp-chatroom/SKILL.md` (适配 Antigravity)
-- `.claude/skills/acp-chatroom/SKILL.md` (适配 Claude Code)
-- `AGENTS.md` (适配 Codex)
+
+要限定到一个项目，运行 `acp install codex --workspace .`。原有的 `acp init-skills` 仍可一次初始化整个工作区。Codex 和 AGY 共用工作区的 `.agents/skills`，Claude Code 使用 `.claude/skills`。
+
+显式消息显示为 `@alice: 请检查测试`。技能提供回信、读板和查询命令。托管进程继承 `ACP_AGENT_HANDLE` 和 `ACP_HUB_URI`，子进程里的 `acp-chat` 会使用这两个值。跨机器时通过 `acp launch ... --uri ws://<hub-host>:8765` 指向同一个 Hub。Hub 无身份验证，应只绑定在受信网络接口上。
+
+第三方 Python 包可在 `[project.entry-points."acp_chatroom.agents"]` 声明 `myagent = "mypackage:profile"`。将 `profile` 导出为 `acp.agents.AgentProfile` 实例，指定执行文件、完全访问参数及技能目录。安装到 ACP 所在 Python 环境后，`agents`、`install` 和 `launch` 都能使用该名称。
 
 ### 3. 启动中央中枢服务 (ACP Hub)
 在第一个独立终端窗口启动 Hub：
@@ -94,6 +101,8 @@ acp launch "codex" --as @codex
 # 启动 Antigravity CLI
 acp launch "agy" --as @antigravity
 ```
+
+启动器默认向 Claude Code 和 AGY 传入 `--dangerously-skip-permissions`，向 Codex 传入 `--dangerously-bypass-approvals-and-sandbox`。传入明确的权限选项时优先使用指定策略，例如 `acp launch "codex --sandbox read-only" --as reviewer`。自定义句柄不会改变所选 agent 的启动参数。
 
 ### 5. 启动人类交互监控大厅 (可选)
 打开一个终端作为人类观察员与调度员：
@@ -139,17 +148,16 @@ acp-chat roster
 
 ## 🧪 运行测试套件
 
-项目自带完整的单元测试与端到端进程注入集成测试：
+安装测试依赖并分别执行两个测试集：
+
 ```bash
-# 1. 测试 SQLite 消息、频道与已读游标
-python -m tests.test_storage
-
-# 2. 测试 WebSocket Hub 与客户端多路复用通讯
-python -m tests.test_hub_and_client
-
-# 3. 测试 Windows ConPTY 终端托管与显式 Prompt 物理注入
-python -m tests.test_launcher
+python -m pip install -e ".[test]"
+python -m pytest -m "not dt"
+python -m pytest -m dt
 ```
+
+UT 覆盖启动参数、技能安装、输入格式及存储。DT 启动独立终端中的 ACP CLI、测试 agent 和真实 WebSocket Hub，验证人工键盘输入、多行消息、单次提交和回信身份。GitHub Actions 在 push 和 pull request 时运行 Windows、Ubuntu × Python 3.10、3.12。Windows 3.12 还使用固定版本的真实 Codex CLI 与本地模拟模型服务，断言提交到模型的中文多行消息完整。
+
 
 ---
 

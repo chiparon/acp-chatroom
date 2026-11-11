@@ -3,6 +3,7 @@ ACP CLI - Unified Command-Line Interface for Hub, Launcher, Console, and Chat To
 """
 
 import sys
+from pathlib import Path
 import click
 from rich.console import Console
 from rich.table import Table
@@ -11,7 +12,8 @@ from .hub import run_hub
 from .launcher import launch_agent
 from .console import start_console
 from .client import sync_send, sync_read, sync_roster
-from .skills_generator import init_workspace_skills
+from .agents import agent_registry
+from .skills_generator import init_workspace_skills, install_skill
 
 rich_console = Console()
 
@@ -40,7 +42,7 @@ def hub_command(host, port, db):
 @cli.command("launch")
 @click.argument("command")
 @click.option("--as", "--handle", "-a", "handle", required=True, help="Agent handle (e.g., @codex, claudecode)")
-@click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--idle-timeout", default=1.5, type=float, help="Seconds of output silence to mark as IDLE")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
 def launch_command(command, handle, uri, idle_timeout, non_interactive):
@@ -58,7 +60,7 @@ def launch_command(command, handle, uri, idle_timeout, non_interactive):
 # 3. acp console
 # -------------------------------------------------------------
 @cli.command("console")
-@click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--as", "--handle", "-a", "handle", default="@user", help="Your user handle")
 def console_command(uri, handle):
     """Open the human observer & interaction terminal."""
@@ -68,6 +70,24 @@ def console_command(uri, handle):
 # -------------------------------------------------------------
 # 4. acp init-skills
 # -------------------------------------------------------------
+@cli.command("agents")
+def agents_command():
+    """List installed agent profiles and their default launch arguments."""
+    for name, profile in agent_registry().items():
+        click.echo(f"{name}: {profile.executable} {profile.access_flag}")
+
+
+@cli.command("install")
+@click.argument("agent")
+@click.option("--workspace", type=click.Path(path_type=Path, file_okay=False), help="Install for one workspace")
+def install_command(agent, workspace):
+    """Install the chatroom skill for AGENT (user-wide by default)."""
+    profile = agent_registry().get(agent)
+    if profile is None:
+        raise click.BadParameter(f"Unknown agent {agent!r}. See 'acp agents'.", param_hint="AGENT")
+    click.echo(install_skill(profile, workspace))
+
+
 @cli.command("init-skills")
 @click.option("--workspace", default=".", help="Target workspace path")
 def init_skills_command(workspace):
@@ -82,8 +102,8 @@ def init_skills_command(workspace):
 @click.option("--to", "-t", "target", required=True, help="Target handle (@agent) or topic (#topic)")
 @click.option("--mode", "-m", type=click.Choice(["explicit", "silent"]), default="silent", help="Message mode")
 @click.option("--topic", default="general", help="Topic channel name")
-@click.option("--from", "sender", default=None, help="Sender handle (@name)")
-@click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--from", "sender", envvar="ACP_AGENT_HANDLE", default=None, help="Sender handle (@name)")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.argument("content")
 def send_command(target, mode, topic, sender, uri, content):
     """Send an explicit prompt to an agent or a silent post to a topic."""
@@ -113,10 +133,10 @@ def send_command(target, mode, topic, sender, uri, content):
 
 @cli.command("read")
 @click.option("--topic", default="general", help="Topic channel name")
-@click.option("--as", "--handle", "-a", "reader", default=None, help="Reader handle for cursor tracking")
+@click.option("--as", "--handle", "-a", "reader", envvar="ACP_AGENT_HANDLE", default=None, help="Reader handle for cursor tracking")
 @click.option("--all", "read_all", is_flag=True, help="Read all messages (ignore unread cursor)")
 @click.option("--limit", default=20, type=int, help="Max messages to fetch")
-@click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 def read_command(topic, reader, read_all, limit, uri):
     """Read unread messages from a topic board and advance your cursor."""
     try:
@@ -146,7 +166,7 @@ def read_command(topic, reader, read_all, limit, uri):
 
 
 @cli.command("roster")
-@click.option("--uri", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 def roster_command(uri):
     """List all registered agents and their current busy/idle status."""
     try:
