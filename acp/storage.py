@@ -69,7 +69,38 @@ class Storage:
                 PRIMARY KEY (host, harness, scope, session_id)
             )
             """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS task_claims (
+                topic TEXT NOT NULL,
+                task TEXT NOT NULL,
+                owner TEXT COLLATE NOCASE NOT NULL,
+                PRIMARY KEY (topic, task)
+            )
+            """)
             conn.commit()
+
+    def claim_task(self, topic: str, task: str, owner: str) -> tuple[bool, str]:
+        with self._get_connection() as conn:
+            inserted = conn.execute("""
+                INSERT INTO task_claims (topic, task, owner) VALUES (?, ?, ?)
+                ON CONFLICT(topic, task) DO NOTHING
+            """, (topic, task, owner))
+            row = conn.execute("SELECT owner FROM task_claims WHERE topic=? AND task=?",
+                               (topic, task)).fetchone()
+            return inserted.rowcount == 1, row["owner"]
+
+    def handoff_task(self, topic: str, task: str, owner: str, successor: str) -> tuple[bool, Optional[str]]:
+        with self._get_connection() as conn:
+            updated = conn.execute("UPDATE task_claims SET owner=? WHERE topic=? AND task=? AND owner=?",
+                                   (successor, topic, task, owner))
+            row = conn.execute("SELECT owner FROM task_claims WHERE topic=? AND task=?",
+                               (topic, task)).fetchone()
+            return updated.rowcount == 1, row["owner"] if row else None
+
+    def list_tasks(self, topic: str) -> list[dict]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT task, owner FROM task_claims WHERE topic=? ORDER BY task", (topic,))
+            return [dict(row) for row in rows]
 
     def save_message(self, msg: Message) -> Message:
         with self._get_connection() as conn:

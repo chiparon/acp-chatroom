@@ -44,12 +44,13 @@ class ACPHub:
         self.server = None
         self._running = False
 
-    async def broadcast_event(self, event_data: Dict[str, Any], exclude: Optional[WebSocketServerProtocol] = None) -> None:
+    async def broadcast_event(self, event_data: Dict[str, Any], exclude: Optional[WebSocketServerProtocol] = None) -> dict[str, bool]:
         payload = json.dumps(event_data)
         # Only broadcast events to registered clients or console clients
-        targets = [ws for ws in self.ws_to_handle.keys() if ws != exclude]
-        if targets:
-            await asyncio.gather(*[self._safe_send(ws, payload) for ws in targets], return_exceptions=True)
+        targets = {ws: handle for ws, handle in self.ws_to_handle.items() if ws != exclude}
+        agents = targets.keys() - self.console_sockets
+        results = await asyncio.gather(*(self._safe_send(ws, payload) for ws in targets))
+        return {targets[ws]: sent for ws, sent in zip(targets, results) if ws in agents}
 
     async def _safe_send(self, ws: WebSocketServerProtocol, payload: str) -> bool:
         try:
@@ -159,6 +160,25 @@ class ACPHub:
             except (TypeError, ValueError) as exc:
                 return {"status": "error", "error": str(exc)}
 
+        if action in (ActionType.TASK_CLAIM.value, ActionType.TASK_HANDOFF.value, ActionType.TASK_LIST.value):
+            topic = data.get("topic", "general").strip()
+            if not topic:
+                return {"status": "error", "error": "Expected a topic"}
+            if action == ActionType.TASK_LIST.value:
+                return {"status": "ok", "tasks": self.storage.list_tasks(topic)}
+            task = data.get("task", "").strip()
+            handle = (self.ws_to_handle.get(websocket) or data.get("sender") or "").strip().lstrip("@")
+            if not task or not handle:
+                return {"status": "error", "error": "Expected a task name and claimant handle"}
+            if action == ActionType.TASK_CLAIM.value:
+                claimed, owner = self.storage.claim_task(topic, task, f"@{handle}")
+                return {"status": "ok", "claimed": claimed, "owner": owner}
+            successor = data.get("to", "").strip().lstrip("@")
+            if not successor:
+                return {"status": "error", "error": "Expected the next owner's handle"}
+            changed, owner = self.storage.handoff_task(topic, task, f"@{handle}", f"@{successor}")
+            return {"status": "ok", "changed": changed, "owner": owner}
+
         # 1. REGISTER
         if action == ActionType.REGISTER.value:
             handle = data.get("handle", "").strip()
@@ -227,6 +247,10 @@ class ACPHub:
             mode = MessageMode(mode_str)
             topic = data.get("topic", "general").strip()
             content = data.get("content", "")
+            if mode in (MessageMode.BROADCAST, MessageMode.URGENT):
+                if not isinstance(content, str) or not content.strip():
+                    return {"status": "error", "error": "Expected broadcast text"}
+                target = "#all"
 
             msg = Message(
                 sender=sender,
@@ -238,6 +262,12 @@ class ACPHub:
             saved = self.storage.save_message(msg)
             msg_dict = saved.to_dict()
 
+            if mode in (MessageMode.BROADCAST, MessageMode.URGENT):
+                exclude = self.clients.get(sender.lower()) if mode == MessageMode.BROADCAST else None
+                results = await self.broadcast_event({"event": EventType.BROADCAST.value, "message": msg_dict},
+                                                     exclude=exclude)
+                return {"status": "ok", "message_id": saved.id, "sent": sum(results.values()),
+                        "failed": [handle for handle, sent in results.items() if not sent]}
             if mode == MessageMode.EXPLICIT:
                 # Direct route ONLY to the targeted agent
                 norm_target = target if target.startswith("@") else f"@{target}"

@@ -222,7 +222,7 @@ def sync_send(
     sender: Optional[str] = None,
 ) -> Dict[str, Any]:
     client = ACPClient(uri=uri, handle=sender)
-    m = MessageMode.EXPLICIT if mode == "explicit" else MessageMode.SILENT
+    m = MessageMode(mode)
     return asyncio.run(client.send_message(target=target, content=content, mode=m, topic=topic, sender=sender))
 
 
