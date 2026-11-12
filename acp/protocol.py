@@ -13,6 +13,8 @@ from typing import NamedTuple, Optional, Dict, Any, List
 class MessageMode(str, Enum):
     EXPLICIT = "explicit"
     SILENT = "silent"
+    BROADCAST = "broadcast"
+    URGENT = "urgent"
 
 
 class AgentStatus(str, Enum):
@@ -22,6 +24,9 @@ class AgentStatus(str, Enum):
 
 
 class ActionType(str, Enum):
+    TASK_CLAIM = "task_claim"
+    TASK_LIST = "task_list"
+    TASK_HANDOFF = "task_handoff"
     SET_MODEL = "set_model"
     CLAIM = "claim"
     REGISTER = "register"
@@ -40,6 +45,7 @@ class SessionKey(NamedTuple):
 
 
 class EventType(str, Enum):
+    BROADCAST = "broadcast"
     SET_MODEL = "set_model"
     EXPLICIT_MESSAGE = "explicit_message"
     SILENT_MESSAGE = "silent_message"

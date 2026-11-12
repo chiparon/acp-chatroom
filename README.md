@@ -156,6 +156,20 @@ acp-chat send --to @codex --mode explicit "请帮我重构 storage.py"
 acp-chat send --to #general --mode silent "架构初稿已完成，大家有空可读"
 ```
 
+### 广播和任务认领
+
+```bash
+acp-chat broadcast "本轮使用同一版输入数据"
+acp-chat broadcast --urgent "暂停提交，等平台确认"
+acp-chat task claim poisson --topic s10 --as alice
+acp-chat task list --topic s10
+acp-chat task handoff poisson --topic s10 --as alice --to bob
+```
+
+普通广播发送给本 Hub 的其他在线 session。各 launcher 从第一条开始至少收集一秒，终端输出静默达到 `--idle-timeout` 后合成一次输入。紧急广播立即进入所有在线 session 的输入队列，包括发送者。发送结果统计 Hub 成功推送的 session 数。每条广播也会保存在 `general` 话题，离线期间的记录可通过 `acp-chat read --topic general --all` 查阅。
+
+同一话题下，任务名区分大小写。并发认领只有一个请求成功，其他请求返回非零退出码并显示当前负责人。归属随 Hub 数据库保存。launcher 中执行任务命令会自动使用自己的 handle，独立终端可以用 `--as` 指定。
+
 ### 从另一个终端选择模型
 
 目标 agent 空闲且输入框为空时执行 `acp model --to gpt1 gpt-6.1-sol`。Hub 把原生 `/model` 指令定向投递给对应的 Codex、Claude Code 或 AGY 启动器。输出确认指令已投递；模型是否可用由目标 CLI 和账号决定。AGY 的原生选择可能同时更新后续会话的默认模型。

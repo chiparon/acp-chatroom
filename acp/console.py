@@ -71,6 +71,10 @@ class HumanConsole:
         color = "green" if status == "idle" else ("yellow" if status == "busy" else "red")
         console.print(f"[dim]• Presence:[/dim] [bold]{handle}[/bold] is now [{color}]{status.upper()}[/{color}]")
 
+    def on_broadcast(self, data: dict) -> None:
+        msg = data["message"]
+        console.print(f"{msg['mode'].upper()} #{msg['id']} {msg['sender']}: {msg['content']}", markup=False)
+
     async def show_roster(self) -> None:
         roster = await self.client.get_roster()
         table = Table(title="👥 Active Agent Roster", border_style="blue")
@@ -97,6 +101,7 @@ class HumanConsole:
 
         self.client.on(EventType.EXPLICIT_MESSAGE.value, self.on_explicit_message)
         self.client.on(EventType.SILENT_MESSAGE.value, self.on_silent_message)
+        self.client.on(EventType.BROADCAST.value, self.on_broadcast)
         self.client.on(EventType.PRESENCE_CHANGE.value, self.on_presence_change)
 
         await self.show_roster()

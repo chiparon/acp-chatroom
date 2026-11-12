@@ -13,7 +13,7 @@ from .hub import run_hub
 from .launcher import launch_agent
 from .console import start_console
 from .client import ACPClient, sync_send, sync_read, sync_roster
-from .protocol import ActionType
+from .protocol import ActionType, MessageMode
 from .agents import agent_registry
 from .skills_generator import init_workspace_skills, install_skill
 
@@ -151,6 +151,75 @@ def send_command(target, mode, topic, sender, uri, content):
     except Exception as e:
         rich_console.print(f"[bold red]❌ Failed to send message:[/bold red] {e}")
         sys.exit(1)
+
+
+def hub_request(uri, payload):
+    try:
+        result = asyncio.run(ACPClient(uri).request(payload))
+    except OSError as error:
+        raise click.ClickException(str(error)) from error
+    if result.get("status") != "ok":
+        raise click.ClickException(result.get("error", "Hub request failed"))
+    return result
+
+
+@cli.command("broadcast")
+@click.argument("content")
+@click.option("--urgent", is_flag=True, help="Send immediately to every online session, including the sender")
+@click.option("--from", "sender", envvar="ACP_AGENT_HANDLE", default=None)
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")
+def broadcast_command(content, urgent, sender, uri):
+    """Send a room-wide announcement. Normal announcements are batched by each peer."""
+    result = hub_request(uri, {"action": ActionType.SEND.value, "target": "#all", "sender": sender,
+                               "mode": MessageMode.URGENT.value if urgent else MessageMode.BROADCAST.value,
+                               "content": content})
+    click.echo(f"Broadcast #{result['message_id']} sent to {result['sent']} online session(s)")
+    if result["failed"]:
+        raise click.ClickException("Delivery failed for " + ", ".join(result["failed"]))
+
+
+@cli.group("task")
+def task_group():
+    """Claim tasks and inspect or transfer ownership."""
+
+
+@task_group.command("claim")
+@click.argument("task")
+@click.option("--as", "sender", envvar="ACP_AGENT_HANDLE", required=True)
+@click.option("--topic", default="general")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")
+def task_claim(task, sender, topic, uri):
+    """Claim TASK once in this topic. A conflict reports the current owner."""
+    result = hub_request(uri, {"action": ActionType.TASK_CLAIM.value, "task": task, "topic": topic, "sender": sender})
+    if not result["claimed"]:
+        raise click.ClickException(f"{task} already claimed by {result['owner']}")
+    click.echo(f"{task} claimed by {result['owner']}")
+
+
+@task_group.command("list")
+@click.option("--topic", default="general")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")
+def task_list(topic, uri):
+    """Show each claimed task and its owner in TOPIC."""
+    result = hub_request(uri, {"action": ActionType.TASK_LIST.value, "topic": topic})
+    for row in result["tasks"]:
+        click.echo(f"{row['task']}\t{row['owner']}")
+
+
+@task_group.command("handoff")
+@click.argument("task")
+@click.option("--to", "successor", required=True)
+@click.option("--as", "sender", envvar="ACP_AGENT_HANDLE", required=True)
+@click.option("--topic", default="general")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")
+def task_handoff(task, successor, sender, topic, uri):
+    """Transfer a task you currently own."""
+    result = hub_request(uri, {"action": ActionType.TASK_HANDOFF.value, "task": task, "topic": topic,
+                               "sender": sender, "to": successor})
+    if not result["changed"]:
+        owner = result["owner"]
+        raise click.ClickException(f"{task} is owned by {owner}" if owner else f"{task} is unclaimed")
+    click.echo(f"{task} transferred to {result['owner']}")
 
 
 @cli.command("read")

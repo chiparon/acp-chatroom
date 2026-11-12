@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue
 from threading import Event, Thread
@@ -18,6 +19,8 @@ from acp.protocol import EventType, MessageMode
 @pytest.mark.skipif(os.environ.get("ACP_TEST_CODEX") != "1", reason="requires the pinned Codex CLI")
 async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
     requests = Queue()
+    broadcasts = Queue()
+    claim_results = Queue()
 
     class Provider(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -27,6 +30,14 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             output = []
             texts = [part.get("text", "") for item in items if item.get("role") == "user"
                      for part in item["content"]]
+            if texts and texts[-1].startswith(("[Broadcast]", "[Urgent broadcast]")):
+                if items[-1].get("role") == "user":
+                    broadcasts.put((self.headers["thread-id"], texts[-1]))
+                    if texts[-1].startswith("[Urgent broadcast]"):
+                        output.append({"type": "function_call", "name": "exec_command", "call_id": "call_claim",
+                                       "arguments": json.dumps({"cmd": "acp-chat task claim shared-task"})})
+                elif items[-1].get("call_id") == "call_claim":
+                    claim_results.put((self.headers["thread-id"], items[-1]["output"]))
             if items[-1].get("role") == "user" and texts[-1].startswith("@tester: "):
                 requests.put((self.headers["thread-id"], texts, payload["model"]))
                 # An actual shell reply exercises the handle and hub URI inherited by this session.
@@ -48,7 +59,7 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
         config = tmp_path / "config"
         config.mkdir()
         (config / "config.toml").write_text(
-            'model = "gpt-5"\nmodel_provider = "localtest"\n'
+            'check_for_update_on_startup = false\nmodel = "gpt-5"\nmodel_provider = "localtest"\n'
             '[model_providers.localtest]\nname = "localtest"\nwire_api = "responses"\n'
             f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
             f'[projects.{json.dumps(str(tmp_path))}]\ntrust_level = "trusted"\n', "utf-8",
@@ -76,6 +87,7 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
                 try:
                     while True:
                         chunk = proc.read()
+                        launcher.last_output_time = time.monotonic()
                         tail += chunk
                         screen.append(chunk)
                         if "\x1b[6n" in tail:
@@ -103,10 +115,28 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             return thread_id, texts
 
         try:
-            await sender.connect()
+            await sender.connect(role="console")
             first, first_task = await start("@gpt1")
             await start("@gpt2")
             await start("@gpt3")
+            for content in ("baseline one", "baseline two"):
+                sent = await sender.send_message("#all", content, MessageMode.BROADCAST)
+                assert sent["sent"] == 3 and not sent["failed"]
+            merged = dict([await asyncio.to_thread(broadcasts.get, True, 30) for _ in range(3)])
+            assert len(merged) == 3
+            for prompt in merged.values():
+                assert prompt.startswith("[Broadcast]") and "baseline one\n#" in prompt and prompt.endswith("baseline two")
+            sent = await sender.send_message("#all", "claim shared-task", MessageMode.URGENT)
+            assert sent["sent"] == 3
+            urgent = dict([await asyncio.to_thread(broadcasts.get, True, 30) for _ in range(3)])
+            assert urgent.keys() == merged.keys()
+            assert all(text.startswith("[Urgent broadcast]") for text in urgent.values())
+            claims = dict([await asyncio.to_thread(claim_results.get, True, 30) for _ in range(3)])
+            assert claims.keys() == merged.keys()
+            (task,) = hub.storage.list_tasks("general")
+            assert task["owner"] in {"@gpt1", "@gpt2", "@gpt3"}
+            assert all(task["owner"] in result for result in claims.values())
+            assert sum("already claimed by" in result for result in claims.values()) == 2
             marker = "中文 first line\nsecond line"
             original_id, _ = await turn("@gpt1", marker)
             # Exit this terminal and wait for the real launcher connection to disappear.

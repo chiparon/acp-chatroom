@@ -19,7 +19,7 @@ from typing import Optional, Any
 
 from .agents import agent_registry
 from .client import ACPClient
-from .protocol import format_explicit_prompt, AgentStatus, EventType, valid_model_id
+from .protocol import format_explicit_prompt, AgentStatus, EventType, MessageMode, valid_model_id
 from .terminal import keyboard_input
 
 if os.name == "nt":
@@ -98,7 +98,9 @@ class AgentLauncher:
         self.client.supports_model_switch = bool(self.profile and self.profile.executable in {"codex", "claude", "agy"})
         self.pty_proc: Optional[Any] = None
         self.sub_proc: Optional[subprocess.Popen] = None
-        self.last_output_time = time.time()
+        self.last_output_time = time.monotonic()
+        self.pending_broadcasts = []
+        self.batch_started = 0.0
         self.current_status = AgentStatus.IDLE
         self._running = False
         self._lock = threading.Lock()
@@ -153,13 +155,40 @@ class AgentLauncher:
         # Inject into agent's terminal stdin cleanly (do NOT print to sys.stdout to prevent TUI distortion)
         self.inject_prompt(formatted_prompt)
 
+    def _receive_broadcast(self, event: dict, messages: queue.SimpleQueue) -> None:
+        msg = event["message"]
+        if msg["mode"] == MessageMode.URGENT.value:
+            messages.put(event)
+        else:
+            if not self.pending_broadcasts:
+                self.batch_started = time.monotonic()
+            self.pending_broadcasts.append(msg)
+
+    def _flush_broadcasts(self, messages: queue.SimpleQueue, now: float) -> None:
+        # Use a fixed window from the first notice so a stream of new notices
+        # cannot postpone a batch indefinitely while the terminal is quiet.
+        if (self.pending_broadcasts and now - self.batch_started >= 1.0
+                and now - self.last_output_time >= self.idle_timeout):
+            messages.put({"event": EventType.BROADCAST.value, "batch": self.pending_broadcasts})
+            self.pending_broadcasts = []
+
+    def _inject_broadcast(self, event: dict) -> None:
+        if "batch" in event:
+            label, notices = "Broadcast", event["batch"]
+        else:
+            label, notices = "Urgent broadcast", [event["message"]]
+        lines = [f"#{m['id']} {m['sender']}: {m['content']}" for m in notices]
+        # Custom, line-oriented agents receive one input line for the entire batch.
+        body = "\n".join(lines) if self.profile else " | ".join(" ".join(line.splitlines()) for line in lines)
+        self.inject_prompt(f"[{label}] {body}")
+
     def _output_reader_pty(self) -> None:
         """Read output from the child PTY and stream to stdout."""
         while self._running and self.pty_proc and self.pty_proc.isalive():
             try:
                 chunk = self.pty_proc.read()
                 if chunk:
-                    self.last_output_time = time.time()
+                    self.last_output_time = time.monotonic()
                     sys.stdout.write(chunk)
                     sys.stdout.flush()
                 else:
@@ -175,7 +204,7 @@ class AgentLauncher:
             try:
                 line = self.sub_proc.stdout.readline()
                 if line:
-                    self.last_output_time = time.time()
+                    self.last_output_time = time.monotonic()
                     sys.stdout.write(line.decode("utf-8", errors="replace"))
                     sys.stdout.flush()
                 else:
@@ -192,10 +221,11 @@ class AgentLauncher:
             except (EOFError, OSError):
                 break
 
-    async def _watchdog_loop(self) -> None:
+    async def _watchdog_loop(self, messages: queue.SimpleQueue) -> None:
         """Watchdog to update presence status between IDLE and BUSY."""
         while self._running:
-            now = time.time()
+            now = time.monotonic()
+            self._flush_broadcasts(messages, now)
             elapsed = now - self.last_output_time
             if elapsed > self.idle_timeout:
                 if self.current_status != AgentStatus.IDLE:
@@ -241,6 +271,7 @@ class AgentLauncher:
         self._running = True
         messages = queue.SimpleQueue()
         self.client.on(EventType.EXPLICIT_MESSAGE.value, messages.put)
+        self.client.on(EventType.BROADCAST.value, lambda event: self._receive_broadcast(event, messages))
         if self.client.supports_model_switch:
             self.client.on(EventType.SET_MODEL.value, messages.put)
 
@@ -251,6 +282,8 @@ class AgentLauncher:
                 if event.get("event") == EventType.SET_MODEL.value:
                     if valid_model_id(event.get("model")):
                         self.inject_prompt("/model " + event["model"])
+                elif event.get("event") == EventType.BROADCAST.value:
+                    self._inject_broadcast(event)
                 else:
                     self.on_explicit_message(event)
 
@@ -281,7 +314,7 @@ class AgentLauncher:
                     await self.client.register(self.handle)
                 else:
                     await self.client.connect(initial_status=AgentStatus.IDLE)
-                watchdog = asyncio.create_task(self._watchdog_loop())
+                watchdog = asyncio.create_task(self._watchdog_loop(messages))
                 while self._running:
                     alive = self.pty_proc.isalive() if self.pty_proc else self.sub_proc.poll() is None
                     if not alive:
