@@ -35,6 +35,17 @@ def test_legacy_activity_ignores_cursor_and_title_updates():
     assert activity.status(time.monotonic() + 3, 1.5) == AgentStatus.IDLE
 
 
+def test_headless_cursor_reply_can_arrive_between_paste_and_enter(monkeypatch):
+    launcher = AgentLauncher("codex", "worker", interactive=False)
+    replies = Mock()
+    monkeypatch.setattr(launcher, "_write", replies)
+    monkeypatch.setattr(launcher, "write_raw", Mock(side_effect=AssertionError("waiting on the paste lock")))
+    launcher._observe_output("\x1b[6")
+    replies.assert_not_called()
+    launcher._observe_output("n")
+    replies.assert_called_once_with("\x1b[1;1R")
+
+
 def test_startup_dialog_and_broadcast_during_work(monkeypatch):
     launcher = AgentLauncher("codex", "worker", interactive=False)
     keys = Mock()

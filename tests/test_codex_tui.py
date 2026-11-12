@@ -3,7 +3,7 @@ import asyncio
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from queue import Queue
+from queue import Empty, Queue
 from threading import Event, Thread
 
 import pytest
@@ -74,11 +74,13 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
         monkeypatch.setenv("TERM", "xterm-256color")
         monkeypatch.setenv("OPENAI_API_KEY", "local-test")
         processes = []
+        screens = {}
 
         async def start(handle, session_id=None):
             launcher = AgentLauncher("codex", handle, uri, interactive=False, session_id=session_id)
             ready = Event()
             screen = []
+            screens[launcher] = screen
 
             def read_terminal():
                 proc = launcher.pty_proc
@@ -118,7 +120,11 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             for content in ("baseline one", "baseline two"):
                 sent = await sender.send_message("#all", content, MessageMode.BROADCAST)
                 assert sent["sent"] == 3 and not sent["failed"]
-            merged = dict([await asyncio.to_thread(broadcasts.get, True, 30) for _ in range(3)])
+            try:
+                merged = dict([await asyncio.to_thread(broadcasts.get, True, 30) for _ in range(3)])
+            except Empty:
+                pytest.fail(str({l.handle: (l.activity.native, l.pending_broadcasts, "".join(screen)[-900:])
+                                 for l, screen in screens.items()}))
             assert len(merged) == 3
             for prompt in merged.values():
                 assert prompt.startswith("[Broadcast]") and "baseline one\n#" in prompt and prompt.endswith("baseline two")

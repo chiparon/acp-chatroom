@@ -197,7 +197,9 @@ class AgentLauncher:
     def _observe_output(self, chunk: str) -> None:
         skip = self.activity.feed(chunk)
         if not self.interactive and self.activity.cursor_query:
-            self.write_raw("\x1b[1;1R")
+            # The TUI can request a cursor report between paste and Enter.
+            # Answer before submitting; queuing behind the paste lock loses Enter.
+            self._write("\x1b[1;1R")
         if self.activity.app:
             if self.activity.native in (AgentStatus.IDLE, AgentStatus.BUSY):
                 self.input_ready.set()
