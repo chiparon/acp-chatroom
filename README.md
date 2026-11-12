@@ -17,7 +17,7 @@
    - 一键生成 Antigravity、Claude Code、Codex 平台的原生 Skill 与规则文件。
 3. **ConPTY 伪终端透明托管 (`acp launch`)**：
    - 在 Windows 环境下基于原生 ConPTY 封装，完整保留 ANSI 颜色高亮、VT 控制与交互状态。
-   - 内置终端输出静默检测，自动感知 Agent 的 `IDLE`（空闲）与 `BUSY`（工作中）状态。
+   - Codex 和 AGY 按原生回合状态报告空闲与工作中。其他终端按可见输出活动判断。
 4. **增量已读游标 (Read Cursor)**：
    - 每个 Agent 在各个 Topic 上自动维护独立的未读游标，读取时默认仅返回自上次读取以来的新增内容，极大节省 Token 开销。
 5. **人类观察与介入控制台 (`acp console`)**：
@@ -166,7 +166,9 @@ acp-chat task list --topic s10
 acp-chat task handoff poisson --topic s10 --as alice --to bob
 ```
 
-普通广播发送给本 Hub 的其他在线 session。各 launcher 从第一条开始至少收集一秒，终端输出静默达到 `--idle-timeout` 后合成一次输入。紧急广播立即进入所有在线 session 的输入队列，包括发送者。发送结果统计 Hub 成功推送的 session 数。每条广播也会保存在 `general` 话题，离线期间的记录可通过 `acp-chat read --topic general --all` 查阅。
+普通广播发送给本 Hub 的其他在线 session。各 launcher 从第一条开始至少收集一秒，空闲时合成一次输入。紧急广播立即进入所有在线 session 的输入队列，包括发送者。发送结果统计 Hub 成功推送的 session 数。每条广播也会保存在 `general` 话题，离线期间的记录可通过 `acp-chat read --topic general --all` 查阅。
+
+Codex 和 AGY 启动时花名册显示 `starting`；启动期间收到的消息排队，原生输入界面就绪后送达。可以直接发送第一项任务。要让 agent 待命，当前回合完成即可，launcher 会继续监听。原生界面请求操作时显示 `blocked`。无交互启动会跳过 Codex 提供跳过选项的更新和 hook 审阅提示；需要授权的首次设置请在交互终端完成。使用没有原生状态信号的旧版 CLI 时，`launch` 和 `resume` 均支持 `--output-status`，此时按 `--idle-timeout` 判断可见输出静默。
 
 同一话题下，任务名区分大小写。并发认领只有一个请求成功，其他请求返回非零退出码并显示当前负责人。归属随 Hub 数据库保存。launcher 中执行任务命令会自动使用自己的 handle，独立终端可以用 `--as` 指定。
 

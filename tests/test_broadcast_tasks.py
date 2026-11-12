@@ -37,9 +37,9 @@ def test_task_claim_is_atomic_across_connections_and_survives_restart(tmp_path):
 
 
 def test_busy_launcher_holds_batch_but_injects_urgent(monkeypatch):
-    launcher = AgentLauncher("codex", "@agent", idle_timeout=2)
+    launcher = AgentLauncher("codex", "@agent", idle_timeout=2, output_status=True)
     monkeypatch.setattr("acp.launcher.time.monotonic", lambda: 20)
-    launcher.last_output_time = 20
+    launcher.activity.last_output = 20
     inbox = queue.SimpleQueue()
     prompts = []
     monkeypatch.setattr(launcher, "inject_prompt", prompts.append)

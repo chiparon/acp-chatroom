@@ -2,7 +2,6 @@
 import asyncio
 import json
 import os
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from queue import Queue
 from threading import Event, Thread
@@ -87,12 +86,9 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
                 try:
                     while True:
                         chunk = proc.read()
-                        launcher.last_output_time = time.monotonic()
+                        launcher._observe_output(chunk)
                         tail += chunk
                         screen.append(chunk)
-                        if "\x1b[6n" in tail:
-                            proc.write("\x1b[1;1R")
-                            tail = tail.replace("\x1b[6n", "")
                         if "]7501;state=idle" in tail:
                             ready.set()
                         tail = tail[-128:]
