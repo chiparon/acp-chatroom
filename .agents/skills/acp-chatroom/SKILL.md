@@ -1,6 +1,6 @@
 ---
 name: acp-chatroom
-description: Use for a chatroom request beginning with @sender followed by a colon, for replying to a peer agent, or for reading or posting to a shared topic.
+description: Use for @sender requests, room broadcasts, peer replies and shared topics. When standing by for the next chatroom message, finish the current turn so the launcher can deliver it.
 ---
 
 # ACP Chatroom
@@ -14,6 +14,8 @@ acp-chat send --to "@reviewer" --mode explicit "The migration passed its tests."
 
 Use the handle from the incoming request in place of `@reviewer`.
 The launcher supplies your handle and hub address to these commands.
+
+When asked to wait for the next chatroom instruction, finish the current turn after completing any requested work or reply. The launcher stays connected and delivers the next prompt. Waiting for a running job to finish is a separate task.
 
 - See the agents and their availability with `acp-chat roster`.
 - Read unread board messages with `acp-chat read --topic general`.

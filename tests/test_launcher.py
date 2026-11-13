@@ -53,15 +53,16 @@ async def test_keyboard_and_direct_message_round_trip(tmp_path):
             env=env,
         )
         await wait_for(lambda: (tmp_path / "ready").exists() and "@worker" in hub.clients, launcher)
-        # Simulate an operator's IME text, cursor key and Enter through the outer terminal.
-        keyboard = "手动😀\x1b[D\r"
-        launcher.write(keyboard)
-        # A marker received by the child orders keyboard input before WebSocket delivery.
-        launcher.write("KEYS_DONE")
-        await wait_for(lambda: (tmp_path / "keys").exists(), launcher)
+        assert next(row["status"] for row in await sender.get_roster() if row["handle"] == "@worker") == "starting"
         content = "  第一行\n  second line  "
         response = await sender.send_message("@worker", content, MessageMode.EXPLICIT)
         assert response["delivered"]
+        # Simulate an operator's IME text, cursor key and Enter through the outer terminal.
+        keyboard = "手动😀\x1b[D\r"
+        launcher.write(keyboard)
+        # The child announces native readiness after the operator closes its startup screen.
+        launcher.write("KEYS_DONE")
+        await wait_for(lambda: (tmp_path / "keys").exists(), launcher)
         await wait_for(lambda: (tmp_path / "pasted").exists(), launcher)
         launcher.write("END_CAPTURE")
         event = await asyncio.wait_for(reply.get(), timeout=15)

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional, Any
 
 from .agents import agent_registry
+from .activity import TerminalActivity
 from .client import ACPClient
 from .dsh import DshSession
 from .protocol import format_explicit_prompt, AgentStatus, EventType, MessageMode, valid_model_id
@@ -57,6 +58,7 @@ class AgentLauncher:
         idle_timeout: float = 1.5,
         interactive: bool = True,
         session_id: Optional[str] = None,
+        output_status: bool = False,
     ):
         self.command = command
         registry = agent_registry()
@@ -93,6 +95,10 @@ class AgentLauncher:
         if not handle and not self.profile:
             raise ValueError("Custom launch commands require --as HANDLE")
         self.argv = self.profile.command(args) if self.profile else args
+        if not interactive and self.profile and self.profile.executable == "codex":
+            # An unattended TUI has no operator for the optional upgrade menu.
+            # Put the launch-scoped default first so explicit user overrides still win.
+            self.argv[1:1] = ["-c", "check_for_update_on_startup=false"]
         self.shell_command = subprocess.list2cmdline(self.argv) if self.profile else command
         self.handle = ("@" + handle.lstrip("@")) if handle else None
         self.uri = uri
@@ -104,10 +110,16 @@ class AgentLauncher:
         self.client.supports_model_switch = bool(self.profile and self.profile.executable in {"codex", "claude", "agy", "dsh"})
         self.pty_proc: Optional[Any] = None
         self.sub_proc: Optional[subprocess.Popen] = None
-        self.last_output_time = time.monotonic()
+        native_apps = {"codex": "codex", "agy": "antigravity"}
+        app = native_apps.get(self.profile.executable) if self.profile and not output_status else None
+        self.activity = TerminalActivity(app)
+        self.input_ready = threading.Event()
+        self.skip_startup_at = None
+        if not app:
+            self.input_ready.set()
         self.pending_broadcasts = []
         self.batch_started = 0.0
-        self.current_status = AgentStatus.IDLE
+        self.current_status = self.activity.status(time.monotonic(), idle_timeout)
         self._running = False
         self._lock = threading.Lock()
 
@@ -176,7 +188,7 @@ class AgentLauncher:
         # Use a fixed window from the first notice so a stream of new notices
         # cannot postpone a batch indefinitely while the terminal is quiet.
         if (self.pending_broadcasts and now - self.batch_started >= 1.0
-                and now - self.last_output_time >= self.idle_timeout):
+                and self.activity.status(now, self.idle_timeout) == AgentStatus.IDLE):
             messages.put({"event": EventType.BROADCAST.value, "batch": self.pending_broadcasts})
             self.pending_broadcasts = []
 
@@ -193,13 +205,34 @@ class AgentLauncher:
         body = "\n".join(lines) if self.profile else " | ".join(" ".join(line.splitlines()) for line in lines)
         return f"[{label}] {body}"
 
+    def _observe_output(self, chunk: str) -> None:
+        skip = self.activity.feed(chunk)
+        if not self.interactive and self.activity.cursor_query:
+            # The TUI can request a cursor report between paste and Enter.
+            # Answer before submitting; queuing behind the paste lock loses Enter.
+            self._write("\x1b[1;1R")
+        if self.activity.app:
+            if self.activity.native in (AgentStatus.IDLE, AgentStatus.BUSY):
+                self.input_ready.set()
+            else:
+                self.input_ready.clear()
+        if not self.interactive and skip:
+            # ConPTY can paint the modal before its input handler is installed.
+            self.skip_startup_at = time.monotonic() + 0.5
+
+    def _advance_startup(self, now: float) -> None:
+        if self.skip_startup_at is not None and now >= self.skip_startup_at:
+            self.skip_startup_at = None
+            if self.activity.native == AgentStatus.STARTING:
+                self.write_raw("\x1b")
+
     def _output_reader_pty(self) -> None:
         """Read output from the child PTY and stream to stdout."""
         while self._running and self.pty_proc and self.pty_proc.isalive():
             try:
                 chunk = self.pty_proc.read()
                 if chunk:
-                    self.last_output_time = time.monotonic()
+                    self._observe_output(chunk)
                     sys.stdout.write(chunk)
                     sys.stdout.flush()
                 else:
@@ -215,7 +248,7 @@ class AgentLauncher:
             try:
                 line = self.sub_proc.stdout.readline()
                 if line:
-                    self.last_output_time = time.monotonic()
+                    self._observe_output(line.decode("utf-8", errors="replace"))
                     sys.stdout.write(line.decode("utf-8", errors="replace"))
                     sys.stdout.flush()
                 else:
@@ -237,25 +270,19 @@ class AgentLauncher:
         while self._running:
             now = time.monotonic()
             self._flush_broadcasts(messages, now)
-            elapsed = now - self.last_output_time
-            if elapsed > self.idle_timeout:
-                if self.current_status != AgentStatus.IDLE:
-                    self.current_status = AgentStatus.IDLE
-                    try:
-                        await self.client.set_presence(AgentStatus.IDLE)
-                    except Exception:
-                        pass
-            else:
-                if self.current_status != AgentStatus.BUSY:
-                    self.current_status = AgentStatus.BUSY
-                    try:
-                        await self.client.set_presence(AgentStatus.BUSY)
-                    except Exception:
-                        pass
+            status = self.activity.status(now, self.idle_timeout)
+            if status != self.current_status:
+                try:
+                    await self.client.set_presence(status)
+                    self.current_status = status
+                except Exception:
+                    pass
             await asyncio.sleep(0.5)
 
     def _spawn(self):
         env = {**os.environ, "ACP_AGENT_HANDLE": self.handle, "ACP_HUB_URI": self.uri}
+        if self.activity.app == "antigravity":
+            env["AGY_CLI_OSC7501"] = "on"
         if self.profile or os.name == "nt" or self.interactive:
             if env.get("TERM", "dumb") == "dumb":
                 env["TERM"] = "xterm-256color"
@@ -358,6 +385,7 @@ class AgentLauncher:
 
         def inject_messages():
             for event in iter(messages.get, None):
+                self.input_ready.wait()
                 if not self._running:
                     return
                 if event.get("event") == EventType.SET_MODEL.value:
@@ -395,10 +423,11 @@ class AgentLauncher:
                 if read:
                     threading.Thread(target=self._user_input_reader, args=(read,), daemon=True).start()
                 if self.needs_claim:
-                    await self.client.register(self.handle)
+                    await self.client.register(self.handle, self.current_status)
                 else:
-                    await self.client.connect(initial_status=AgentStatus.IDLE)
+                    await self.client.connect(initial_status=self.current_status)
                 watchdog = asyncio.create_task(self._watchdog_loop(messages))
+                startup_notice = time.monotonic() + 45
                 while self._running:
                     alive = self.pty_proc.isalive() if self.pty_proc else self.sub_proc.poll() is None
                     if not alive:
@@ -407,10 +436,21 @@ class AgentLauncher:
                         break
                     if self.needs_claim and not self.client.connected:
                         raise ConnectionError("Lost the Hub connection owning this handle")
+                    if self.activity.app and not self.interactive and not self.activity.started:
+                        self._advance_startup(time.monotonic())
+                        if self.activity.native == AgentStatus.BLOCKED:
+                            raise ValueError(f"{self.handle}: native startup requires operator input. "
+                                             "Open the agent interactively to complete setup.")
+                        if time.monotonic() >= startup_notice:
+                            print(f"{self.handle}: still waiting for the native input screen. Messages are queued. "
+                                  "Inspect the startup screen; use --output-status for older CLIs.",
+                                  file=sys.stderr, flush=True)
+                            startup_notice = float("inf")
                     await asyncio.sleep(0.1)
                 self._running = False
         finally:
             self._running = False
+            self.input_ready.set()
             messages.put(None)
             if injector.is_alive():
                 await asyncio.to_thread(injector.join)
@@ -435,6 +475,7 @@ def launch_agent(
     idle_timeout: float = 1.5,
     interactive: bool = True,
     session_id: Optional[str] = None,
+    output_status: bool = False,
 ) -> None:
     launcher = AgentLauncher(
         command=command,
@@ -443,5 +484,6 @@ def launch_agent(
         idle_timeout=idle_timeout,
         interactive=interactive,
         session_id=session_id,
+        output_status=output_status,
     )
     asyncio.run(launcher.run())

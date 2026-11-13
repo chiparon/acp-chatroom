@@ -46,8 +46,9 @@ def hub_command(host, port, db):
 @click.option("--as", "--handle", "-a", "handle", help="Agent handle (profiles receive an automatic name if omitted)")
 @click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--idle-timeout", default=1.5, type=float, help="Seconds of output silence to mark as IDLE")
+@click.option("--output-status", is_flag=True, help="Use output activity for CLIs without native session state")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
-def launch_command(command, handle, uri, idle_timeout, non_interactive):
+def launch_command(command, handle, uri, idle_timeout, non_interactive, output_status):
     """Launch and wrap an agent process in ConPTY with automatic prompt injection."""
     try:
         launch_agent(
@@ -55,6 +56,7 @@ def launch_command(command, handle, uri, idle_timeout, non_interactive):
             handle=handle,
             uri=uri,
             idle_timeout=idle_timeout,
+            output_status=output_status,
             interactive=not non_interactive,
         )
     except (ValueError, OSError) as exc:
@@ -67,12 +69,14 @@ def launch_command(command, handle, uri, idle_timeout, non_interactive):
 @click.option("--as", "--handle", "-a", "handle", help="Preferred chat handle, if available")
 @click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
-def resume_command(agent, session_id, handle, uri, non_interactive):
+@click.option("--output-status", is_flag=True, help="Use output activity for CLIs without native session state")
+def resume_command(agent, session_id, handle, uri, non_interactive, output_status):
     """Recall a native session by ID and register it with the Hub."""
     if agent not in agent_registry():
         raise click.BadParameter(f"Unknown agent {agent!r}. See 'acp agents'.", param_hint="AGENT")
     try:
-        launch_agent(agent, handle, uri, interactive=not non_interactive, session_id=session_id)
+        launch_agent(agent, handle, uri, interactive=not non_interactive, session_id=session_id,
+                     output_status=output_status)
     except (ValueError, OSError) as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -143,7 +147,7 @@ def send_command(target, mode, topic, sender, uri, content):
         delivered = res.get("delivered")
         if mode == "explicit":
             if delivered:
-                rich_console.print(f"[bold green]✓[/bold green] Explicit message [bold yellow]#{msg_id}[/bold yellow] delivered and injected into [cyan]{target}[/cyan]")
+                rich_console.print(f"[bold green]✓[/bold green] Explicit message [bold yellow]#{msg_id}[/bold yellow] sent to the [cyan]{target}[/cyan] launcher")
             else:
                 rich_console.print(f"[bold yellow]![/bold yellow] Explicit message [bold yellow]#{msg_id}[/bold yellow] saved to queue ([dim]{target} is currently offline[/dim])")
         else:

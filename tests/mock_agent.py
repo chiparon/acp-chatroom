@@ -36,7 +36,9 @@ def main():
     received = ""
     while "END_CAPTURE" not in received:
         received += read()
-        if "KEYS_DONE" in received:
+        if "KEYS_DONE" in received and not (root / "keys").exists():
+            sys.stdout.write("\x1b]7501;state=idle:app=codex\x07")
+            sys.stdout.flush()
             (root / "keys").touch()
         if "\x1b[201~\r" in received:
             (root / "pasted").touch()

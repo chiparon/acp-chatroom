@@ -18,6 +18,8 @@ class MessageMode(str, Enum):
 
 
 class AgentStatus(str, Enum):
+    STARTING = "starting"
+    BLOCKED = "blocked"
     IDLE = "idle"
     BUSY = "busy"
     OFFLINE = "offline"
