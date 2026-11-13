@@ -19,6 +19,7 @@ from typing import Optional, Any
 
 from .agents import agent_registry
 from .client import ACPClient
+from .dsh import DshSession
 from .protocol import format_explicit_prompt, AgentStatus, EventType, MessageMode, valid_model_id
 from .terminal import keyboard_input
 
@@ -69,12 +70,17 @@ class AgentLauncher:
             if executable.suffix.lower() in {".exe", ".cmd", ".bat"}:
                 name = executable.stem.lower()
         self.profile = registry.get(name)
+        # Other DSH profiles (e.g. web or a custom TUI) keep the custom-command path.
+        self.native_dsh = name == "dsh" and args[1:] in ([], ["acp"], ["--profile", "acp"])
+        if name == "dsh" and not self.native_dsh:
+            self.profile = None
         self.session = None
         if session_id is not None:
             if not self.profile or len(args) != 1:
                 raise ValueError(f"Unknown resume profile: {command}")
             self.session = self.profile.session_key(session_id)
-            args.extend((*self.profile.resume_args, self.session.session_id))
+            if self.profile.resume_args:
+                args.extend((*self.profile.resume_args, self.session.session_id))
         elif self.profile and self.profile.resume_args:
             # Recognize the documented legacy command even with explicit launcher defaults.
             defaults = {self.profile.access_flag, "--no-daemon"}
@@ -94,8 +100,8 @@ class AgentLauncher:
         self.interactive = interactive
 
         self.needs_claim = self.session is not None or not self.handle
-        self.client = ACPClient(uri=self.uri, handle=None if self.needs_claim else self.handle)
-        self.client.supports_model_switch = bool(self.profile and self.profile.executable in {"codex", "claude", "agy"})
+        self.client = ACPClient(uri=self.uri, handle=None if self.needs_claim or self.native_dsh else self.handle)
+        self.client.supports_model_switch = bool(self.profile and self.profile.executable in {"codex", "claude", "agy", "dsh"})
         self.pty_proc: Optional[Any] = None
         self.sub_proc: Optional[subprocess.Popen] = None
         self.last_output_time = time.monotonic()
@@ -139,21 +145,23 @@ class AgentLauncher:
 
     def on_explicit_message(self, event_data: dict) -> None:
         """Callback when an explicit message arrives for this agent from ACP Hub."""
+        prompt = self._explicit_prompt(event_data)
+        if prompt is not None:
+            self.inject_prompt(prompt)
+
+    def _explicit_prompt(self, event_data: dict) -> str | None:
         msg = event_data.get("message", {})
         target = msg.get("target", "").strip()
         norm_target = target if target.startswith("@") else f"@{target}"
 
         # CRITICAL ROUTING CHECK: Ensure this message was actually addressed to this agent!
         if norm_target.lower() != self.handle.lower():
-            return
+            return None
 
         sender = msg.get("sender", "@unknown")
         content = msg.get("content", "")
 
-        formatted_prompt = format_explicit_prompt(sender, content)
-
-        # Inject into agent's terminal stdin cleanly (do NOT print to sys.stdout to prevent TUI distortion)
-        self.inject_prompt(formatted_prompt)
+        return format_explicit_prompt(sender, content)
 
     def _receive_broadcast(self, event: dict, messages: queue.SimpleQueue) -> None:
         msg = event["message"]
@@ -173,6 +181,9 @@ class AgentLauncher:
             self.pending_broadcasts = []
 
     def _inject_broadcast(self, event: dict) -> None:
+        self.inject_prompt(self._broadcast_prompt(event))
+
+    def _broadcast_prompt(self, event: dict) -> str:
         if "batch" in event:
             label, notices = "Broadcast", event["batch"]
         else:
@@ -180,7 +191,7 @@ class AgentLauncher:
         lines = [f"#{m['id']} {m['sender']}: {m['content']}" for m in notices]
         # Custom, line-oriented agents receive one input line for the entire batch.
         body = "\n".join(lines) if self.profile else " | ".join(" ".join(line.splitlines()) for line in lines)
-        self.inject_prompt(f"[{label}] {body}")
+        return f"[{label}] {body}"
 
     def _output_reader_pty(self) -> None:
         """Read output from the child PTY and stream to stdout."""
@@ -267,6 +278,76 @@ class AgentLauncher:
         )
         return self._output_reader_subprocess
 
+    def _dsh_keyboard(self, dsh, messages):
+        loop = asyncio.get_running_loop()
+
+        def local_line(line):
+            if dsh.permission_reply is not None and not dsh.permission_reply.done():
+                dsh.permission_reply.set_result(line)
+            elif line.strip():
+                messages.put({"event": "keyboard", "text": line})
+
+        def read_lines():
+            try:
+                while self._running:
+                    line = input()
+                    if self._running:
+                        loop.call_soon_threadsafe(local_line, line)
+            except (EOFError, OSError):
+                if self._running:
+                    loop.call_soon_threadsafe(setattr, self, "_running", False)
+
+        threading.Thread(target=read_lines, daemon=True).start()
+
+    def _dsh_input(self, event):
+        kind = event["event"]
+        if kind == EventType.BROADCAST.value:
+            return self._broadcast_prompt(event)
+        if kind == EventType.SET_MODEL.value:
+            model = event.get("model")
+            return model if valid_model_id(model) else None
+        if kind == "keyboard":
+            return event["text"]
+        return self._explicit_prompt(event)
+
+    async def _run_dsh(self, messages):
+        env = {**os.environ, "ACP_AGENT_HANDLE": self.handle, "ACP_HUB_URI": self.uri}
+        interactive = self.interactive and sys.stdin.isatty()
+        native_id = self.session.session_id if self.session else None
+        async with DshSession.open(self.argv, env, native_id, interactive) as dsh:
+            if not self.needs_claim:
+                await self.client.connect()
+            await self.client.register(self.handle, session=self.profile.session_key(dsh.session_id))
+            print(f"{self.handle} DSH session {dsh.session_id}", flush=True)
+            if interactive:
+                self._dsh_keyboard(dsh, messages)
+
+            turn = None
+            try:
+                while self._running:
+                    if dsh.process.returncode is not None:
+                        raise OSError(f"DSH exited with status {dsh.process.returncode}")
+                    if not self.client.connected:
+                        raise ConnectionError("Lost the Hub connection owning this handle")
+                    if turn is not None and turn.done():
+                        await turn
+                        turn = None
+                        self.last_output_time = time.monotonic()
+                        await self.client.set_presence(AgentStatus.IDLE)
+                    if turn is None:
+                        self._flush_broadcasts(messages, time.monotonic())
+                        if not messages.empty():
+                            event = messages.get_nowait()
+                            prompt = self._dsh_input(event)
+                            if prompt is not None:
+                                await self.client.set_presence(AgentStatus.BUSY)
+                                turn = asyncio.create_task(dsh.turn(event["event"], prompt))
+                    await asyncio.sleep(0.1)
+            finally:
+                if turn is not None:
+                    turn.cancel()
+                    await asyncio.gather(turn, return_exceptions=True)
+
     async def run(self) -> None:
         self._running = True
         messages = queue.SimpleQueue()
@@ -300,6 +381,9 @@ class AgentLauncher:
                 if not shutil.which(self.argv[0]):
                     raise ValueError(f"Executable not found: {self.argv[0]}")
                 print(f"Starting {self.handle}", flush=True)
+            if self.native_dsh:
+                await self._run_dsh(messages)
+                return
             # Register only after stdin is writable. A sender may act on presence immediately.
             reader = self._spawn()
             injector.start()

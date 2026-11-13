@@ -1,5 +1,6 @@
 """Install the chatroom skill in an agent's native discovery directory."""
 from pathlib import Path
+import os
 
 from .agents import AgentProfile, agent_registry
 
@@ -20,6 +21,8 @@ Always reply to explicit sender requests via `acp-chat send --to @sender --mode 
 
 def install_skill(profile: AgentProfile, workspace: Path | None = None) -> Path:
     root = Path.home() / profile.user_skills if workspace is None else workspace / profile.workspace_skills
+    if workspace is None and profile.executable == "dsh" and os.environ.get("DSH_HOME"):
+        root = Path(os.environ["DSH_HOME"]).expanduser() / "skills"
     target = root / "acp-chatroom" / "SKILL.md"
     content = Path(__file__).with_name("chatroom_skill.md").read_bytes()
     target.parent.mkdir(parents=True, exist_ok=True)

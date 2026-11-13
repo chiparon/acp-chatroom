@@ -200,6 +200,19 @@ class ACPHub:
             if registered and registered.lower() != norm_handle:
                 return {"status": "error", "error": f"Connection already registered as {registered}"}
             handle = registered or handle
+            # A protocol-driven harness learns a fresh session's ID after spawning.
+            if data.get("session") is not None:
+                try:
+                    session = SessionKey(**data["session"])
+                except TypeError:
+                    return {"status": "error", "error": "Invalid session identity"}
+                if not all(isinstance(v, str) and v for v in session):
+                    return {"status": "error", "error": "Invalid session identity"}
+                if claim and claim.session and claim.session != session:
+                    return {"status": "error", "error": "Connection reserved a different session"}
+                if any(c.session == session for ws, c in self.claims.items() if ws != websocket):
+                    return {"status": "error", "error": "Session is already claimed"}
+                claim = self.claims[websocket] = Claim(handle, session)
             self.storage.update_roster(handle, status, claim.session if claim else None)
             self.clients[norm_handle] = websocket
             self.ws_to_handle[websocket] = handle
