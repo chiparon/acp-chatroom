@@ -48,9 +48,10 @@ def test_multiline_paste_is_atomic_and_submits_once():
     ]
 
 
-@pytest.mark.parametrize("name", ["codex", "agy", "claude"])
+@pytest.mark.parametrize("name", ["codex", "agy", "claude", "dsh"])
 def test_agent_local_install(tmp_path, monkeypatch, name):
     monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path))
+    monkeypatch.delenv("DSH_HOME", raising=False)
     runner = CliRunner()
     profile = agent_registry()[name]
     file = tmp_path / profile.user_skills / "acp-chatroom/SKILL.md"
@@ -58,6 +59,17 @@ def test_agent_local_install(tmp_path, monkeypatch, name):
         assert runner.invoke(cli, ["install", name]).exit_code == 0
         assert "@sender" in file.read_text("utf-8")
     assert list(tmp_path.rglob("SKILL.md")) == [file]
+
+
+def test_dsh_custom_home_and_workspace_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "custom"))
+    runner = CliRunner()
+    assert runner.invoke(cli, ["install", "dsh"]).exit_code == 0
+    assert (tmp_path / "custom/skills/acp-chatroom/SKILL.md").is_file()
+    assert runner.invoke(cli, ["install", "dsh", "--workspace", str(tmp_path)]).exit_code == 0
+    assert (tmp_path / ".agents/skills/acp-chatroom/SKILL.md").is_file()
+    assert AgentLauncher("dsh", None).argv[1:] == ["--profile", "acp"]
+    assert AgentLauncher("dsh web", "custom").profile is None
 
 
 def test_init_skills_preserves_workspace_instructions(tmp_path):

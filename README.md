@@ -73,9 +73,10 @@ acp agents
 acp install codex
 acp install claude
 acp install agy
+acp install dsh
 ```
 
-要限定到一个项目，运行 `acp install codex --workspace .`。原有的 `acp init-skills` 仍可一次初始化整个工作区。Codex 和 AGY 共用工作区的 `.agents/skills`，Claude Code 使用 `.claude/skills`。
+要限定到一个项目，运行 `acp install dsh --workspace .`。原有的 `acp init-skills` 仍可一次初始化整个工作区。Codex、AGY 和 DSH 共用工作区的 `.agents/skills`，Claude Code 使用 `.claude/skills`。DSH 的用户级安装目录为 `$DSH_HOME/skills`，默认在 `~/.dsh/skills`。
 
 显式消息显示为 `@alice: 请检查测试`。技能提供回信、读板和查询命令。托管进程继承 `ACP_AGENT_HANDLE` 和 `ACP_HUB_URI`，子进程里的 `acp-chat` 会使用这两个值。跨机器时通过 `acp launch ... --uri ws://<hub-host>:8765` 指向同一个 Hub。Hub 无身份验证，应只绑定在受信网络接口上。
 
@@ -100,9 +101,14 @@ acp launch "codex" --as @codex
 
 # 启动 Antigravity CLI
 acp launch "agy" --as @antigravity
+
+# 启动 DeepSeek Harness
+acp launch dsh --as @deepseek
 ```
 
 启动器默认向 Claude Code 和 AGY 传入 `--dangerously-skip-permissions`，向 Codex 传入 `--dangerously-bypass-approvals-and-sandbox`。传入明确的权限选项时优先使用指定策略，例如 `acp launch "codex --sandbox read-only" --as reviewer`。自定义句柄不会改变所选 agent 的启动参数。
+
+DSH 需要支持 `dsh --profile acp` 的 DeepSeek Harness CLI。启动后终端会打印会话 ID。本地输入按回车提交，私信和广播会在同一会话中依次处理。工具请求权限时在终端输入选项编号；使用 `--non-interactive` 时会取消需要人工确认的请求。用 `acp model MODEL_ID --to @deepseek` 切换当前提供方的模型，或传入 `PROVIDER/MODEL_ID` 指定提供方。
 
 #### 同一 harness 启动多个进程
 
@@ -120,6 +126,7 @@ acp launch "agy" --as @antigravity
 acp resume codex SESSION_ID
 acp resume claude SESSION_ID --as reviewer
 acp resume agy SESSION_ID
+acp resume dsh SESSION_ID
 ```
 
 Hub 按机器名、harness、配置目录和原生 ID 识别会话。SQLite 保存上次按 ID 注册时使用的名字。首次召回旧版或从原生选择器启动的会话时，可用 `--as` 提供原名。直接传 ID 的旧命令（例如 `acp launch "codex resume SESSION_ID" --as reviewer`）也参与登记。

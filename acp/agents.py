@@ -14,7 +14,7 @@ from .protocol import SessionKey
 @dataclass(frozen=True)
 class AgentProfile:
     executable: str
-    access_flag: str
+    access_flag: str | None
     user_skills: str
     workspace_skills: str = ".agents/skills"
     permission_options: tuple[str, ...] = ()
@@ -22,7 +22,7 @@ class AgentProfile:
     config_env: str | None = None
 
     def session_key(self, session_id: str) -> SessionKey:
-        if not self.resume_args:
+        if not self.resume_args and self.executable != "dsh":
             raise ValueError(f"{self.executable} does not define a native resume command")
         try:
             session_id = str(uuid.UUID(session_id))
@@ -47,7 +47,9 @@ class AgentProfile:
                 exe = str(installed)
         flags = {arg.partition("=")[0] for arg in argv[1:]}
         has_policy = flags.intersection((self.access_flag, *self.permission_options))
-        defaults = [] if has_policy else [self.access_flag]
+        defaults = [self.access_flag] if self.access_flag and not has_policy else []
+        if self.executable == "dsh" and len(argv) == 1:
+            defaults.extend(("--profile", "acp"))
         # The shared Codex daemon runs shells with its starter's ACP handle and hub.
         if self.executable == "codex" and not flags.intersection({"--no-daemon", "--remote"}):
             defaults.append("--no-daemon")
@@ -62,6 +64,7 @@ def agent_registry() -> dict[str, AgentProfile]:
     profiles = {
         "claude": claude, "claudecode": claude,
         "agy": agy, "antigravity": agy,
+        "dsh": AgentProfile("dsh", None, ".dsh/skills", config_env="DSH_HOME"),
         "codex": AgentProfile("codex", "--dangerously-bypass-approvals-and-sandbox", ".agents/skills",
                               permission_options=("-s", "--sandbox", "-a", "--ask-for-approval", "--approve-for-me"),
                               resume_args=("resume",), config_env="CODEX_HOME"),

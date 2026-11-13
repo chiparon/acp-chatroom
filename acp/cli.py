@@ -113,7 +113,7 @@ def install_command(agent, workspace):
 @cli.command("init-skills")
 @click.option("--workspace", default=".", help="Target workspace path")
 def init_skills_command(workspace):
-    """Generate ACP skill and rule files for Antigravity, Claude Code, and Codex."""
+    """Generate ACP skills and workspace instructions for the registered agents."""
     init_workspace_skills(workspace_root=workspace)
 
 

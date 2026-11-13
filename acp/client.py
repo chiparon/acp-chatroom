@@ -139,7 +139,8 @@ class ACPClient:
             if should_close:
                 await self.close()
 
-    async def register(self, handle: str, status: AgentStatus = AgentStatus.IDLE, role: str = "agent") -> Dict[str, Any]:
+    async def register(self, handle: str, status: AgentStatus = AgentStatus.IDLE, role: str = "agent",
+                       session: SessionKey | None = None) -> Dict[str, Any]:
         payload = {
             "action": ActionType.REGISTER.value,
             "handle": handle if handle.startswith("@") else f"@{handle}",
@@ -147,6 +148,8 @@ class ACPClient:
             "role": role,
             "supports_model_switch": self.supports_model_switch,
         }
+        if session is not None:
+            payload["session"] = session._asdict()
         result = await self.request(payload)
         if result.get("status") != "ok":
             raise ValueError(result.get("error", "Registration failed"))
