@@ -94,7 +94,7 @@ def test_draft_editing_navigation_history_and_wide_chars():
     for ch in "测试中文输入框不换行溢出检查测试文字":
         hc.handle_key(ch)
     lines, cursor_row, cursor_col = hc.render_dock_lines(width=36)
-    assert cursor_row == len(lines) - 1
+    assert lines[cursor_row].startswith("@user> ")
     for line in lines:
         assert cell_len(line) <= 35
     assert cursor_col <= 35
@@ -126,3 +126,52 @@ def test_quit_and_ctrl_c_stop_console_and_clear_dock():
     hc2.handle_key("\x03")
     assert not hc2._running
     assert not hc2._dock_active
+
+
+def test_help_commands_unknown_hint_and_persistent_command_bar(monkeypatch):
+    hc, buf = _make_test_console(width=120, dock_active=True)
+
+    wide_lines, cursor_row, _ = hc.render_dock_lines(width=120)
+    assert lines_has_cmds(wide_lines, ["/send", "/post", "/broadcast", "/read", "/roster", "/help", "/quit"])
+    assert cursor_row == 1
+
+    narrow_lines, _, _ = hc.render_dock_lines(width=70)
+    assert lines_has_cmds(narrow_lines, ["/send", "/post", "/broadcast", "/read", "/roster", "/help", "/quit"])
+    for line in narrow_lines:
+        assert cell_len(line) <= 69
+
+    for alias in ("/help", "/?", "help"):
+        buf.seek(0)
+        buf.truncate(0)
+        assert hc.handle_command(alias)
+        text = buf.getvalue()
+        assert "ACP Console Manual" in text
+        assert "/broadcast" in text
+        assert "Left/Right" in text
+
+    buf.seek(0)
+    buf.truncate(0)
+    assert hc.handle_command("/unknowncmd")
+    assert "Type /help" in buf.getvalue()
+
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+
+    hc.client.send_message = AsyncMock(side_effect=fake_send)
+    monkeypatch.setattr(hc, "_schedule", lambda coro, loop: asyncio.run(coro))
+
+    hc.handle_command("/broadcast sync checkpoint")
+    hc.handle_command("/broadcast --urgent stop merge now")
+    assert len(sent) == 2
+    assert sent[0]["mode"] == MessageMode.BROADCAST
+    assert sent[0]["content"] == "sync checkpoint"
+    assert sent[1]["mode"] == MessageMode.URGENT
+    assert sent[1]["content"] == "stop merge now"
+
+
+def lines_has_cmds(lines: list[str], cmds: list[str]) -> bool:
+    joined = "\n".join(lines)
+    return all(cmd in joined for cmd in cmds)
+
