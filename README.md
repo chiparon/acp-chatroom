@@ -142,7 +142,7 @@ Hub 按机器名、harness、配置目录和原生 ID 识别会话。SQLite 保�
 ```bash
 acp console
 ```
-在控制台中可实时滚动查看所有 Agent 消息，底部提供独立输入框与常驻指令栏，并支持以下命令：
+在控制台中可实时滚动查看所有 Agent 消息，底部常驻在线 Agent 状态栏、独立输入框与快捷指令栏，并支持以下命令：
 - `/send @codex 帮我检查刚才编写的测试用例`：向指定 Agent 发送显式 prompt 唤醒执行。
 - `/post #general 大家注意，主分支已合并代码`：向静默消息板发布消息。
 - `/broadcast [--urgent] 本轮统一使用新数据`：向所有在线 Agent 广播消息（加 `--urgent` 可跳过空闲等待立即投递）。

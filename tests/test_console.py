@@ -2,9 +2,11 @@ import asyncio
 import io
 from unittest.mock import AsyncMock
 
+from click.testing import CliRunner
 from rich.cells import cell_len
 from rich.console import Console
 
+import acp.cli as cli_mod
 from acp.console import HumanConsole
 from acp.protocol import MessageMode
 
@@ -133,7 +135,8 @@ def test_help_commands_unknown_hint_and_persistent_command_bar(monkeypatch):
 
     wide_lines, cursor_row, _ = hc.render_dock_lines(width=120)
     assert lines_has_cmds(wide_lines, ["/send", "/post", "/broadcast", "/read", "/roster", "/help", "/quit"])
-    assert cursor_row == 1
+    assert cursor_row == 2
+    assert wide_lines[cursor_row].startswith("@user> ")
 
     narrow_lines, _, _ = hc.render_dock_lines(width=70)
     assert lines_has_cmds(narrow_lines, ["/send", "/post", "/broadcast", "/read", "/roster", "/help", "/quit"])
@@ -174,4 +177,52 @@ def test_help_commands_unknown_hint_and_persistent_command_bar(monkeypatch):
 def lines_has_cmds(lines: list[str], cmds: list[str]) -> bool:
     joined = "\n".join(lines)
     return all(cmd in joined for cmd in cmds)
+
+
+def test_persistent_online_agents_bar_updates_with_roster_and_presence():
+    hc, buf = _make_test_console(width=100, dock_active=True)
+
+    initial_lines, _, _ = hc.render_dock_lines(width=100)
+    assert "Online Agents (0): none" in initial_lines
+
+    hc.client.get_roster = AsyncMock(
+        return_value=[
+            {"handle": "@user", "status": "idle", "last_seen": "2026-11-15T12:00:00"},
+            {"handle": "@codex", "status": "idle", "last_seen": "2026-11-15T12:00:00"},
+            {"handle": "@claude", "status": "busy", "last_seen": "2026-11-15T12:00:00"},
+            {"handle": "@agy", "status": "offline", "last_seen": "2026-11-15T11:55:00"},
+        ]
+    )
+    asyncio.run(hc.show_roster())
+    dock_after_roster, _, _ = hc.render_dock_lines(width=100)
+    assert any("Online Agents (2): @claude [BUSY] · @codex [IDLE]" in line for line in dock_after_roster)
+
+    buf.seek(0)
+    buf.truncate(0)
+    hc.on_presence_change({"handle": "@codex", "status": "busy"})
+    hc.on_presence_change({"handle": "@claude", "status": "offline"})
+    rendered = buf.getvalue()
+    assert "Online Agents (1): @codex [BUSY]" in rendered
+
+
+def test_read_message_spacing_in_console_and_cli(monkeypatch):
+    sample = [
+        {"created_at": "2026-11-15T12:00:01Z", "sender": "@codex", "mode": "silent", "content": "first update [1]"},
+        {"created_at": "2026-11-15T12:01:02Z", "sender": "@claude", "mode": "explicit", "content": "second reply"},
+    ]
+
+    hc, buf = _make_test_console(width=100, dock_active=False)
+    hc.client.read_board = AsyncMock(return_value=sample)
+    asyncio.run(hc._do_read("general"))
+    console_out = buf.getvalue().replace("\r\n", "\n")
+    assert "@codex:\n    first update [1]\n\n  2026-11-15 12:01:02 @claude:\n    second reply" in console_out
+
+    cli_buf = io.StringIO()
+    monkeypatch.setattr(cli_mod, "rich_console", Console(file=cli_buf, width=100, force_terminal=False, no_color=True))
+    monkeypatch.setattr(cli_mod, "sync_read", lambda **kwargs: sample)
+    res = CliRunner().invoke(cli_mod.cli, ["read", "--topic", "general", "--all"])
+    assert res.exit_code == 0
+    cli_out = cli_buf.getvalue().replace("\r\n", "\n")
+    assert "@codex:\n    first update [1]\n\n  2026-11-15 12:01:02 [EXP] @claude:\n    second reply" in cli_out
+
 

@@ -247,14 +247,18 @@ def read_command(topic, reader, read_all, limit, uri):
             rich_console.print(f"[dim]No new unread messages in #{topic}.[/dim]")
             return
 
-        rich_console.print(f"[bold cyan]📢 Messages in #{topic} (count: {len(messages)}):[/bold cyan]")
-        for m in messages:
+        rich_console.print(f"[bold cyan]📢 Messages in #{topic} (count: {len(messages)}):[/bold cyan]\n")
+        for idx, m in enumerate(messages):
+            if idx > 0:
+                rich_console.print()
             t = m.get("created_at", "")[:19].replace("T", " ")
             sender = m.get("sender", "@unknown")
             mode = m.get("mode", "silent")
             content = m.get("content", "")
             prefix = "[magenta][EXP][/magenta] " if mode == "explicit" else ""
-            rich_console.print(f"  [dim]{t}[/dim] {prefix}[yellow]{sender}[/yellow]: {content}")
+            rich_console.print(f"  [dim]{t}[/dim] {prefix}[yellow]{sender}[/yellow]:")
+            rich_console.print(f"    {content}", markup=False)
+        rich_console.print()
     except Exception as e:
         rich_console.print(f"[bold red]❌ Failed to read topic #{topic}:[/bold red] {e}")
         sys.exit(1)
