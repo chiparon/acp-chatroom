@@ -128,6 +128,7 @@ class HumanConsole:
         self._dock_active = False
         self._dock_lines = 0
         self._dock_cursor_row = 0
+        self.roster_state: dict[str, str] = {}
 
     @property
     def _out_console(self) -> Console:
@@ -138,14 +139,27 @@ class HumanConsole:
         out.write(text)
         out.flush()
 
+    def format_online_agents_bar(self, max_cells: Optional[int] = None) -> str:
+        """Build a single-line summary of currently online agents and their statuses."""
+        with self._ui_lock:
+            online = [
+                (handle, status)
+                for handle, status in sorted(self.roster_state.items())
+                if handle and handle != self.handle and status.lower() != AgentStatus.OFFLINE.value
+            ]
+        summary = " · ".join(f"{h} [{s.upper()}]" for h, s in online) if online else "none"
+        line = f"Online Agents ({len(online)}): {summary}"
+        return _clip_to_cells(line, max_cells) if max_cells is not None else line
+
     def render_dock_lines(self, width: Optional[int] = None) -> tuple[list[str], int, int]:
-        """Build the bottom dock (separator, draft input, persistent command bar)."""
+        """Build the bottom dock (separator, online agents bar, draft input, command bar)."""
         cols = max(20, width if width is not None else self._out_console.width)
         max_cells = cols - 1
 
         label = "─ Draft Input (Enter send · Esc clear · /help manual) "
         fill = "─" * max(0, max_cells - cell_len(label))
         sep_line = _clip_to_cells(label + fill, max_cells)
+        agents_line = self.format_online_agents_bar(max_cells)
 
         prompt = f"{self.handle}> "
         prompt_cells = cell_len(prompt)
@@ -166,7 +180,7 @@ class HumanConsole:
         else:
             cmd_line = _clip_to_cells(cmd_bar_compact, max_cells)
 
-        return [sep_line, input_line, cmd_line], 1, cursor_col
+        return [sep_line, agents_line, input_line, cmd_line], 2, cursor_col
 
     def _clear_dock(self) -> None:
         if not self._dock_lines:
@@ -286,12 +300,16 @@ class HumanConsole:
         )
 
     def on_presence_change(self, data: dict) -> None:
-        handle = escape(str(data.get("handle", "")))
-        status = str(data.get("status", ""))
-        color = "green" if status == "idle" else ("yellow" if status == "busy" else "red")
+        raw_handle = str(data.get("handle", ""))
+        raw_status = str(data.get("status", "")).lower()
+        if raw_handle and raw_handle != self.handle:
+            with self._ui_lock:
+                self.roster_state[raw_handle] = raw_status
+        handle = escape(raw_handle)
+        color = "green" if raw_status == "idle" else ("yellow" if raw_status == "busy" else "red")
         self._emit(
             lambda: self._out_console.print(
-                f"[dim]• Presence:[/dim] [bold]{handle}[/bold] is now [{color}]{escape(status.upper())}[/{color}]"
+                f"[dim]• Presence:[/dim] [bold]{handle}[/bold] is now [{color}]{escape(raw_status.upper())}[/{color}]"
             )
         )
 
@@ -306,6 +324,12 @@ class HumanConsole:
 
     async def show_roster(self) -> None:
         roster = await self.client.get_roster()
+        with self._ui_lock:
+            self.roster_state = {
+                str(r.get("handle", "")): str(r.get("status", "offline")).lower()
+                for r in roster
+                if r.get("handle") and r.get("handle") != self.handle
+            }
         table = Table(title="👥 Active Agent Roster", border_style="blue")
         table.add_column("Agent Handle", style="cyan", no_wrap=True)
         table.add_column("Status", style="bold")
@@ -603,10 +627,17 @@ class HumanConsole:
     async def _do_read(self, topic: str) -> None:
         messages = await self.client.read_board(topic=topic, reader=self.handle, unread_only=False, limit=20)
         def _render() -> None:
-            self._out_console.print(f"\n[bold cyan]📖 Recent messages in #{topic} (count: {len(messages)}):[/bold cyan]")
-            for m in messages:
-                t = m.get("created_at", "")[:19].replace("T", " ")
-                self._out_console.print(f"  [dim]{t}[/dim] [yellow]{m.get('sender')}[/yellow]: {m.get('content')}")
+            self._out_console.print(
+                f"\n[bold cyan]📖 Recent messages in #{escape(topic)} (count: {len(messages)}):[/bold cyan]\n"
+            )
+            for idx, m in enumerate(messages):
+                if idx > 0:
+                    self._out_console.print()
+                t = str(m.get("created_at", ""))[:19].replace("T", " ")
+                sender = escape(str(m.get("sender", "@unknown")))
+                content = escape(str(m.get("content", "")))
+                self._out_console.print(f"  [dim]{t}[/dim] [yellow]{sender}[/yellow]:")
+                self._out_console.print(f"    {content}")
             self._out_console.print()
         self._emit(_render)
 
