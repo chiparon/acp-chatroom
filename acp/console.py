@@ -139,11 +139,11 @@ class HumanConsole:
         out.flush()
 
     def render_dock_lines(self, width: Optional[int] = None) -> tuple[list[str], int, int]:
-        """Build the bottom draft-input dock rows and return (lines, cursor_row, cursor_col)."""
+        """Build the bottom dock (separator, draft input, persistent command bar)."""
         cols = max(20, width if width is not None else self._out_console.width)
         max_cells = cols - 1
 
-        label = "─ Draft Input (Enter to send, Esc clear) "
+        label = "─ Draft Input (Enter send · Esc clear · /help manual) "
         fill = "─" * max(0, max_cells - cell_len(label))
         sep_line = _clip_to_cells(label + fill, max_cells)
 
@@ -153,7 +153,20 @@ class HumanConsole:
         visible, rel_col = _window_around_cursor(self._input_buffer, self._cursor_pos, avail)
         input_line = prompt + visible
         cursor_col = prompt_cells + rel_col
-        return [sep_line, input_line], 1, cursor_col
+
+        cmd_bar_full = (
+            "Commands: /send @agent <msg> | /post [#topic] <msg> | "
+            "/broadcast <msg> | /read [topic] | /roster | /help | /quit"
+        )
+        cmd_bar_compact = "Cmds: /send | /post | /broadcast | /read | /roster | /help | /quit"
+        if cell_len(cmd_bar_full) <= max_cells:
+            cmd_line = cmd_bar_full
+        elif cell_len(cmd_bar_compact) <= max_cells:
+            cmd_line = cmd_bar_compact
+        else:
+            cmd_line = _clip_to_cells(cmd_bar_compact, max_cells)
+
+        return [sep_line, input_line, cmd_line], 1, cursor_col
 
     def _clear_dock(self) -> None:
         if not self._dock_lines:
@@ -206,12 +219,38 @@ class HumanConsole:
                     "[bold cyan]🤖 ACP Multi-Agent Chatroom Console[/bold cyan]\n"
                     "[dim]Observing agent-to-agent communication & Human-in-the-loop steering[/dim]\n\n"
                     "Commands:\n"
-                    "  [green]/send @agent <message>[/green]  - Send explicit prompt directly to agent\n"
-                    "  [cyan]/post #topic <message>[/cyan]  - Post silent message to message board\n"
-                    "  [yellow]/roster[/yellow]                - List active online agents & status\n"
-                    "  [yellow]/read <topic>[/yellow]          - Read recent messages from topic\n"
-                    "  [red]/quit[/red] or [red]/exit[/red]         - Exit console",
+                    "  [green]/send @agent <message>[/green]         - Send explicit prompt directly to agent\n"
+                    "  [cyan]/post [#topic] <message>[/cyan]       - Post silent message to topic (default #general)\n"
+                    "  [magenta]/broadcast [--urgent] <msg>[/magenta]    - Broadcast message to all online agents\n"
+                    "  [yellow]/roster[/yellow]                        - List active online agents & status\n"
+                    "  [yellow]/read [topic][/yellow]                  - Read recent messages from topic\n"
+                    "  [blue]/help[/blue] or [blue]/?[/blue]                    - Show full console manual\n"
+                    "  [red]/quit[/red] or [red]/exit[/red]                - Exit console",
                     border_style="cyan",
+                )
+            )
+        )
+
+    def print_help(self) -> None:
+        """Display full command manual and keyboard shortcuts above the input dock."""
+        self._emit(
+            lambda: self._out_console.print(
+                Panel.fit(
+                    "[bold cyan]📘 ACP Console Manual[/bold cyan]\n\n"
+                    "[bold]Commands:[/bold]\n"
+                    "  [green]/send @agent <message>[/green]         Send explicit prompt to wake/steer @agent\n"
+                    "  [cyan]/post [#topic] <message>[/cyan]       Post passive update to #topic (default #general)\n"
+                    "  [magenta]/broadcast [--urgent] <msg>[/magenta]    Broadcast to all online agents (--urgent bypasses idle wait)\n"
+                    "  [yellow]/roster[/yellow]                        Refresh active agent roster & status table\n"
+                    "  [yellow]/read [topic][/yellow]                  Read recent 20 messages from #topic (default general)\n"
+                    "  [blue]/help[/blue], [blue]/?[/blue], [blue]help[/blue]                Show this command reference\n"
+                    "  [red]/quit[/red], [red]/exit[/red], [red]:q[/red]             Disconnect and exit console\n\n"
+                    "[bold]Input Box Shortcuts:[/bold]\n"
+                    "  [dim]Left/Right, Home/End[/dim]           Move cursor inside active draft\n"
+                    "  [dim]Up/Down[/dim]                        Browse submitted command history\n"
+                    "  [dim]Esc / Ctrl+U[/dim]                   Clear current draft input\n"
+                    "  [dim]Ctrl+C[/dim]                         Exit console",
+                    border_style="blue",
                 )
             )
         )
@@ -293,13 +332,15 @@ class HumanConsole:
         if raw in ("/quit", "/exit", ":q"):
             self._running = False
             return False
-        if raw == "/roster":
+        if raw in ("/help", "/?", "help"):
+            self.print_help()
+        elif raw == "/roster":
             self._schedule(self.show_roster(), loop)
-        elif raw.startswith("/read"):
+        elif raw == "/read" or raw.startswith("/read "):
             parts = raw.split(maxsplit=1)
-            topic = parts[1] if len(parts) > 1 else "general"
-            self._schedule(self._do_read(topic), loop)
-        elif raw.startswith("/send"):
+            topic = parts[1].lstrip("#") if len(parts) > 1 else "general"
+            self._schedule(self._do_read(topic or "general"), loop)
+        elif raw == "/send" or raw.startswith("/send "):
             # /send @target message
             parts = raw.split(maxsplit=2)
             if len(parts) < 3:
@@ -316,18 +357,21 @@ class HumanConsole:
                 ),
                 loop,
             )
-        elif raw.startswith("/post"):
+        elif raw == "/post" or raw.startswith("/post "):
             # /post #topic message OR /post message
             parts = raw.split(maxsplit=2)
             if len(parts) < 2:
                 self._emit(lambda: self._out_console.print("[red]Usage: /post [#topic] <message>[/red]"))
                 return True
             if parts[1].startswith("#"):
-                topic = parts[1][1:]
+                topic = parts[1][1:] or "general"
                 msg = parts[2] if len(parts) > 2 else ""
             else:
                 topic = "general"
                 msg = raw.split(maxsplit=1)[1]
+            if not msg:
+                self._emit(lambda: self._out_console.print("[red]Usage: /post [#topic] <message>[/red]"))
+                return True
             self._schedule(
                 self.client.send_message(
                     target=f"#{topic}",
@@ -338,10 +382,30 @@ class HumanConsole:
                 ),
                 loop,
             )
+        elif raw == "/broadcast" or raw.startswith("/broadcast "):
+            parts = raw.split(maxsplit=1)
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            urgent = False
+            if rest == "--urgent" or rest.startswith("--urgent "):
+                urgent = True
+                rest = rest[len("--urgent"):].strip()
+            if not rest:
+                self._emit(lambda: self._out_console.print("[red]Usage: /broadcast [--urgent] <message>[/red]"))
+                return True
+            self._schedule(
+                self.client.send_message(
+                    target="#general",
+                    content=rest,
+                    mode=MessageMode.URGENT if urgent else MessageMode.BROADCAST,
+                    topic="general",
+                    sender=self.handle,
+                ),
+                loop,
+            )
         else:
             self._emit(
                 lambda: self._out_console.print(
-                    "[yellow]Unknown command. Type /send, /post, /roster, or /read.[/yellow]"
+                    "[yellow]Unknown command. Type /help for the command manual.[/yellow]"
                 )
             )
         return True
