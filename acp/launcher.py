@@ -30,6 +30,13 @@ else:
     from ptyprocess import PtyProcessUnicode as PtyProcess
 
 
+# Terminal query replies (cursor position, device attributes, OSC colors) must
+# reach the child PTY immediately instead of queuing behind inject_prompt()'s lock.
+_TERMINAL_REPLY = re.compile(
+    r"\x1b(?:\[[0-9;?]*[Rnuc]|\][0-9]+;[^\x07\x1b]*(?:\x07|\x1b\\))"
+)
+
+
 def split_command(command: str) -> list[str]:
     if os.name != "nt":
         return shlex.split(command)
@@ -122,6 +129,9 @@ class AgentLauncher:
         self.current_status = self.activity.status(time.monotonic(), idle_timeout)
         self._running = False
         self._lock = threading.Lock()
+        self._write_lock = threading.Lock()
+        self.last_cursor_io = 0.0
+        self.pending_cursor_query: Optional[float] = None
 
     def write_raw(self, text: str) -> None:
         """Write raw characters directly into the terminal stream."""
@@ -129,15 +139,37 @@ class AgentLauncher:
             self._write(text)
 
     def _write(self, text: str) -> None:
-        if self.pty_proc and self.pty_proc.isalive():
-            self.pty_proc.write(text)
-        elif self.sub_proc and self.sub_proc.stdin and self.sub_proc.poll() is None:
-            self.sub_proc.stdin.write(text.encode("utf-8"))
-            self.sub_proc.stdin.flush()
+        with self._write_lock:
+            if self.pty_proc and self.pty_proc.isalive():
+                self.pty_proc.write(text)
+            elif self.sub_proc and self.sub_proc.stdin and self.sub_proc.poll() is None:
+                self.sub_proc.stdin.write(text.encode("utf-8"))
+                self.sub_proc.stdin.flush()
 
     def write_input(self, text: str) -> None:
         ending = "\r" if self.pty_proc else "\n"
         self.write_raw(text.rstrip("\r\n") + ending)
+
+    def _wait_codex_paste(self, settle: float = 0.3, reply_grace: float = 0.1) -> None:
+        deadline = time.monotonic() + settle
+        while True:
+            now = time.monotonic()
+            pending = self.pending_cursor_query
+            if pending is not None and now - pending >= reply_grace:
+                self.pending_cursor_query = None
+                self.last_cursor_io = now
+                self._write("\x1b[1;1R")
+            if self.last_cursor_io:
+                deadline = max(deadline, self.last_cursor_io + settle)
+            remaining = deadline - now
+            if remaining <= 0:
+                return
+            pending = self.pending_cursor_query
+            if pending is not None:
+                until_grace = pending + reply_grace - now
+                if until_grace > 0:
+                    remaining = min(remaining, until_grace)
+            time.sleep(min(remaining, 0.02))
 
     def inject_prompt(self, text: str) -> None:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -150,7 +182,7 @@ class AgentLauncher:
                 # Codex on ConPTY folds an immediate Enter into its paste burst.
                 # Keep operator input out of the editor until this turn is submitted.
                 if os.name == "nt" and self.profile.executable == "codex":
-                    time.sleep(0.3)
+                    self._wait_codex_paste()
                 self._write("\r")
         else:
             self.write_input(text)
@@ -207,10 +239,15 @@ class AgentLauncher:
 
     def _observe_output(self, chunk: str) -> None:
         skip = self.activity.feed(chunk)
-        if not self.interactive and self.activity.cursor_query:
-            # The TUI can request a cursor report between paste and Enter.
-            # Answer before submitting; queuing behind the paste lock loses Enter.
-            self._write("\x1b[1;1R")
+        if self.activity.cursor_query:
+            now = time.monotonic()
+            self.last_cursor_io = now
+            if not self.interactive or not sys.stdin.isatty():
+                # The TUI can request a cursor report between paste and Enter.
+                # Answer before submitting; queuing behind the paste lock loses Enter.
+                self._write("\x1b[1;1R")
+            else:
+                self.pending_cursor_query = now
         if self.activity.app:
             if self.activity.native in (AgentStatus.IDLE, AgentStatus.BUSY):
                 self.input_ready.set()
@@ -256,12 +293,31 @@ class AgentLauncher:
             except Exception:
                 break
 
+    def _forward_user_input(self, chunk: str) -> None:
+        # Deliver terminal query replies immediately so injects holding _lock do not block them.
+        parts = []
+        last = 0
+        for match in _TERMINAL_REPLY.finditer(chunk):
+            if match.start() > last:
+                parts.append(chunk[last:match.start()])
+            reply = match.group(0)
+            if reply.endswith("R"):
+                self.pending_cursor_query = None
+                self.last_cursor_io = time.monotonic()
+            self._write(reply)
+            last = match.end()
+        if last < len(chunk):
+            parts.append(chunk[last:])
+        user_text = "".join(parts)
+        if user_text:
+            self.write_raw(user_text)
+
     def _user_input_reader(self, read) -> None:
         while self._running:
             try:
                 chunk = read()
                 if chunk and self._running:
-                    self.write_raw(chunk)
+                    self._forward_user_input(chunk)
             except (EOFError, OSError):
                 break
 

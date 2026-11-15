@@ -1,4 +1,5 @@
 import queue
+import threading
 import time
 from unittest.mock import Mock
 
@@ -71,3 +72,55 @@ def test_startup_dialog_and_broadcast_during_work(monkeypatch):
     launcher._observe_output("\x1b[21;3Hredraw")
     launcher._flush_broadcasts(inbox, time.monotonic() + 10)
     assert launcher.input_ready.is_set() and len(inbox.get_nowait()["batch"]) == 1
+
+
+def test_interactive_cursor_reply_bypasses_paste_lock_and_extends_settle(monkeypatch):
+    launcher = AgentLauncher("codex", "worker", interactive=True)
+    monkeypatch.setattr("acp.launcher.sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("acp.launcher.os.name", "nt")
+
+    events = []
+
+    class FakePty:
+        def isalive(self):
+            return True
+
+        def write(self, text):
+            events.append((time.monotonic(), text))
+
+    launcher.pty_proc = FakePty()
+
+    def simulate_tui_and_host():
+        time.sleep(0.05)
+        launcher._observe_output("\x1b[6n")
+        time.sleep(0.05)
+        launcher._forward_user_input("\x1b[21;5Rx")
+
+    driver = threading.Thread(target=simulate_tui_and_host, daemon=True)
+    driver.start()
+    launcher.inject_prompt("hello\nworld")
+    driver.join(timeout=2)
+
+    texts = [text for _, text in events]
+    assert texts == ["\x1b[200~hello\nworld\x1b[201~", "\x1b[21;5R", "\r", "x"]
+    t_reply = events[1][0]
+    t_enter = events[2][0]
+    assert t_enter - t_reply >= 0.25
+
+
+def test_interactive_cursor_query_falls_back_when_host_silent(monkeypatch):
+    launcher = AgentLauncher("codex", "worker", interactive=True)
+    monkeypatch.setattr("acp.launcher.sys.stdin.isatty", lambda: True)
+    replies = []
+    monkeypatch.setattr(launcher, "_write", lambda text: replies.append((time.monotonic(), text)))
+
+    launcher._observe_output("\x1b[6n")
+    assert replies == []
+    started = time.monotonic()
+    launcher._wait_codex_paste(settle=0.08, reply_grace=0.03)
+    finished = time.monotonic()
+
+    assert [text for _, text in replies] == ["\x1b[1;1R"]
+    assert finished - replies[0][0] >= 0.06
+    assert finished - started >= 0.09
+
