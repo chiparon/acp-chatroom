@@ -84,7 +84,29 @@ async def test_hub_and_client():
         codex_status = next(r["status"] for r in roster_after if r["handle"] == "@codex")
         assert codex_status == "busy"
 
+        # 7. Disconnecting removes the agent from the active roster automatically
         await c1.close()
+        for _ in range(50):
+            handles_after = [r["handle"] for r in await c2.get_roster()]
+            if "@antigravity" not in handles_after:
+                break
+            await asyncio.sleep(0.02)
+        assert "@antigravity" not in handles_after
+
+        # 8. remove_agent disconnects a live agent and clears it from the roster
+        c3 = ACPClient(uri=uri, handle="@extra")
+        await c3.connect()
+        assert "@extra" in [r["handle"] for r in await c2.get_roster()]
+        removed = await c2.remove_agent("@extra")
+        assert removed["status"] == "ok" and removed["was_online"] is True
+        for _ in range(50):
+            if not c3.connected:
+                break
+            await asyncio.sleep(0.02)
+        assert not c3.connected
+        assert "@extra" not in [r["handle"] for r in await c2.get_roster()]
+        await c3.close()
+
         await c2.close()
         print("All Hub and Client integration tests passed successfully!")
 

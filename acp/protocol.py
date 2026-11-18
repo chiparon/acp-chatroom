@@ -32,6 +32,8 @@ class ActionType(str, Enum):
     SET_MODEL = "set_model"
     CLAIM = "claim"
     REGISTER = "register"
+    REMOVE = "remove"
+    PRUNE = "prune"
     SEND = "send"
     READ = "read"
     ROSTER = "roster"

@@ -238,6 +238,8 @@ class HumanConsole:
                     "  [magenta]/broadcast [--urgent] <msg>[/magenta]    - Broadcast message to all online agents\n"
                     "  [yellow]/roster[/yellow]                        - List active online agents & status\n"
                     "  [yellow]/read [topic][/yellow]                  - Read recent messages from topic\n"
+                    "  [red]/remove @agent[/red]                 - Disconnect & remove agent from roster\n"
+                    "  [red]/prune[/red]                         - Remove offline/stale entries from roster\n"
                     "  [blue]/help[/blue] or [blue]/?[/blue]                    - Show full console manual\n"
                     "  [red]/quit[/red] or [red]/exit[/red]                - Exit console",
                     border_style="cyan",
@@ -257,6 +259,8 @@ class HumanConsole:
                     "  [magenta]/broadcast [--urgent] <msg>[/magenta]    Broadcast to all online agents (--urgent bypasses idle wait)\n"
                     "  [yellow]/roster[/yellow]                        Refresh active agent roster & status table\n"
                     "  [yellow]/read [topic][/yellow]                  Read recent 20 messages from #topic (default general)\n"
+                    "  [red]/remove @agent[/red] (or [red]/kick[/red])      Disconnect @agent and remove from roster\n"
+                    "  [red]/prune[/red]                         Remove all offline/stale entries from roster\n"
                     "  [blue]/help[/blue], [blue]/?[/blue], [blue]help[/blue]                Show this command reference\n"
                     "  [red]/quit[/red], [red]/exit[/red], [red]:q[/red]             Disconnect and exit console\n\n"
                     "[bold]Input Box Shortcuts:[/bold]\n"
@@ -304,7 +308,11 @@ class HumanConsole:
         raw_status = str(data.get("status", "")).lower()
         if raw_handle and raw_handle != self.handle:
             with self._ui_lock:
-                self.roster_state[raw_handle] = raw_status
+                if raw_status == AgentStatus.OFFLINE.value:
+                    for key in [k for k in self.roster_state if k.lower() == raw_handle.lower()]:
+                        self.roster_state.pop(key, None)
+                else:
+                    self.roster_state[raw_handle] = raw_status
         handle = escape(raw_handle)
         color = "green" if raw_status == "idle" else ("yellow" if raw_status == "busy" else "red")
         self._emit(
@@ -426,6 +434,15 @@ class HumanConsole:
                 ),
                 loop,
             )
+        elif raw in ("/remove", "/kick") or raw.startswith(("/remove ", "/kick ")):
+            parts = raw.split(maxsplit=1)
+            target = parts[1].strip() if len(parts) > 1 else ""
+            if not target or not target.lstrip("@"):
+                self._emit(lambda: self._out_console.print("[red]Usage: /remove @agent[/red]"))
+                return True
+            self._schedule(self._do_remove(target), loop)
+        elif raw == "/prune":
+            self._schedule(self._do_prune(), loop)
         else:
             self._emit(
                 lambda: self._out_console.print(
@@ -640,6 +657,43 @@ class HumanConsole:
                 self._out_console.print(f"    {content}")
             self._out_console.print()
         self._emit(_render)
+
+    async def _do_remove(self, target: str) -> None:
+        try:
+            res = await self.client.remove_agent(target)
+        except Exception as exc:
+            self._emit(lambda: self._out_console.print(f"[red]❌ Remove failed: {escape(str(exc))}[/red]"))
+            return
+        if res.get("status") != "ok":
+            err = escape(str(res.get("error", "Remove failed")))
+            self._emit(lambda: self._out_console.print(f"[red]❌ {err}[/red]"))
+            return
+        handle = str(res.get("handle", target))
+        with self._ui_lock:
+            for key in [k for k in self.roster_state if k.lower() == handle.lower()]:
+                self.roster_state.pop(key, None)
+        self._emit(lambda: self._out_console.print(f"[green]✓ Removed {escape(handle)}[/green]"))
+
+    async def _do_prune(self) -> None:
+        try:
+            res = await self.client.prune_roster()
+        except Exception as exc:
+            self._emit(lambda: self._out_console.print(f"[red]❌ Prune failed: {escape(str(exc))}[/red]"))
+            return
+        if res.get("status") != "ok":
+            err = escape(str(res.get("error", "Prune failed")))
+            self._emit(lambda: self._out_console.print(f"[red]❌ {err}[/red]"))
+            return
+        removed = res.get("removed", [])
+        with self._ui_lock:
+            removed_lower = {h.lower() for h in removed}
+            for key in [k for k in self.roster_state if k.lower() in removed_lower]:
+                self.roster_state.pop(key, None)
+        if removed:
+            names = escape(", ".join(removed))
+            self._emit(lambda: self._out_console.print(f"[green]✓ Pruned {len(removed)} offline agent(s): {names}[/green]"))
+        else:
+            self._emit(lambda: self._out_console.print("[dim]No offline agents to prune.[/dim]"))
 
 
 def start_console(uri: str = "ws://127.0.0.1:8765", handle: str = "@user") -> None:

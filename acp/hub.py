@@ -3,6 +3,7 @@ ACP Hub - Central WebSocket Server & Router for Multi-Agent Communication
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import re
@@ -34,6 +35,7 @@ class ACPHub:
         self.host = host
         self.port = port
         self.storage = Storage(db_path)
+        self.storage.clear_roster()
         self.clients: Dict[str, WebSocketServerProtocol] = {}  # norm_handle (lower) -> ws
         self.ws_to_handle: Dict[WebSocketServerProtocol, str] = {}  # ws -> handle
         # Claims last for the owning socket's lifetime, including during native startup.
@@ -41,6 +43,7 @@ class ACPHub:
         self.console_sockets: Set[WebSocketServerProtocol] = set()
         self.all_sockets: Set[WebSocketServerProtocol] = set()
         self.model_sockets: Set[WebSocketServerProtocol] = set()
+        self._close_after_reply: Set[WebSocketServerProtocol] = set()
         self.server = None
         self._running = False
 
@@ -60,6 +63,16 @@ class ACPHub:
             logger.debug(f"Failed to send to client: {e}")
             return False
 
+    async def _safe_close(self, ws: WebSocketServerProtocol) -> None:
+        try:
+            close = getattr(ws, "close", None)
+            if callable(close):
+                res = close()
+                if inspect.isawaitable(res):
+                    await res
+        except Exception as e:
+            logger.debug(f"Failed to close client: {e}")
+
     async def handle_connection(self, websocket: WebSocketServerProtocol) -> None:
         self.all_sockets.add(websocket)
         logger.info(f"New connection from {websocket.remote_address}")
@@ -76,6 +89,10 @@ class ACPHub:
                         if req_id is not None:
                             response["req_id"] = req_id
                         await websocket.send(json.dumps(response))
+                    if websocket in self._close_after_reply:
+                        self._close_after_reply.discard(websocket)
+                        await self._safe_close(websocket)
+                        break
                 except websockets.exceptions.ConnectionClosed:
                     break
                 except json.JSONDecodeError:
@@ -95,6 +112,7 @@ class ACPHub:
             await self._cleanup_connection(websocket)
 
     async def _cleanup_connection(self, websocket: WebSocketServerProtocol) -> None:
+        self._close_after_reply.discard(websocket)
         self.model_sockets.discard(websocket)
         self.claims.pop(websocket, None)
         self.all_sockets.discard(websocket)
@@ -102,8 +120,8 @@ class ACPHub:
         handle = self.ws_to_handle.pop(websocket, None)
         if handle and self.clients.get(handle.lower()) is websocket:
             self.clients.pop(handle.lower(), None)
-            self.storage.update_roster(handle, AgentStatus.OFFLINE.value)
-            logger.info(f"Agent {handle} disconnected and marked offline")
+            self.storage.remove_roster(handle)
+            logger.info(f"Agent {handle} disconnected and removed from roster")
             await self.broadcast_event({
                 "event": EventType.PRESENCE_CHANGE.value,
                 "handle": handle,
@@ -140,7 +158,7 @@ class ACPHub:
                     break
         else:
             # Keep unused historical roster names available to returning sessions.
-            used = occupied | {row["handle"].lower() for row in self.storage.get_roster()}
+            used = occupied | {row["handle"].lower() for row in self.storage.get_roster()} | self.storage.get_session_handles()
             number = 1
             while f"@{harness}{number}".lower() in used:
                 number += 1
@@ -363,7 +381,68 @@ class ACPHub:
             })
             return {"status": "ok", "action": "presence"}
 
-        # 6. PING
+        # 6. REMOVE / PRUNE
+        elif action == ActionType.REMOVE.value:
+            raw = (data.get("target") or data.get("handle") or "").strip()
+            cleaned = raw.lstrip("@")
+            if not cleaned:
+                return {"status": "error", "error": "Expected a handle to remove"}
+            handle = f"@{cleaned}"
+            norm_handle = handle.lower()
+
+            ws = self.clients.pop(norm_handle, None)
+            actual_handle = handle
+            sockets_to_close = []
+            if ws is not None:
+                actual_handle = self.ws_to_handle.pop(ws, handle)
+                self.model_sockets.discard(ws)
+                self.console_sockets.discard(ws)
+                self.claims.pop(ws, None)
+                sockets_to_close.append(ws)
+
+            claim_sockets = [
+                c_ws for c_ws, claim in list(self.claims.items())
+                if claim.handle.lower() == norm_handle
+            ]
+            for c_ws in claim_sockets:
+                claim = self.claims.pop(c_ws)
+                if ws is None:
+                    actual_handle = claim.handle
+                if c_ws not in sockets_to_close:
+                    sockets_to_close.append(c_ws)
+
+            removed_db = self.storage.remove_roster(actual_handle, remove_session=True)
+            if ws is None and not claim_sockets and not removed_db:
+                return {"status": "error", "error": f"Handle {handle} not found"}
+
+            await self.broadcast_event({
+                "event": EventType.PRESENCE_CHANGE.value,
+                "handle": actual_handle,
+                "status": AgentStatus.OFFLINE.value,
+            })
+            for target_ws in sockets_to_close:
+                if target_ws is websocket:
+                    self._close_after_reply.add(target_ws)
+                else:
+                    await self._safe_close(target_ws)
+            return {
+                "status": "ok",
+                "action": "remove",
+                "handle": actual_handle,
+                "was_online": ws is not None,
+            }
+
+        elif action == ActionType.PRUNE.value:
+            removed = self.storage.prune_offline_roster(self.ws_to_handle.values())
+            for h in removed:
+                await self.broadcast_event({
+                    "event": EventType.PRESENCE_CHANGE.value,
+                    "handle": h,
+                    "status": AgentStatus.OFFLINE.value,
+                })
+            return {"status": "ok", "action": "prune", "removed": removed, "count": len(removed)}
+
+        # 7. PING
         elif action == ActionType.PING.value:
             return {"event": EventType.PONG.value}
 
@@ -381,9 +460,7 @@ class ACPHub:
         if self.server:
             self.server.close()
             await self.server.wait_closed()
-        # Mark all connected clients offline
-        for handle in list(self.clients.keys()):
-            self.storage.update_roster(handle, AgentStatus.OFFLINE.value)
+        self.storage.clear_roster()
         logger.info("ACP Hub stopped.")
 
 
