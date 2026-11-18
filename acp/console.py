@@ -323,7 +323,10 @@ class HumanConsole:
         )
 
     async def show_roster(self) -> None:
-        roster = await self.client.get_roster()
+        # Apply the snapshot in the reader, before it dispatches newer presence events.
+        await self.client.get_roster(on_roster=self._display_roster)
+
+    def _display_roster(self, roster: list[dict]) -> None:
         with self._ui_lock:
             self.roster_state = {
                 str(r.get("handle", "")): str(r.get("status", "offline")).lower()
@@ -527,18 +530,20 @@ class HumanConsole:
     def _read_tty_keys(self, loop: asyncio.AbstractEventLoop) -> None:
         if os.name == "nt":
             arrow_map = {"K": "LEFT", "M": "RIGHT", "G": "HOME", "O": "END", "S": "DELETE", "H": "UP", "P": "DOWN"}
+            decoder = codecs.getincrementaldecoder("utf-16-le")(errors="replace")
             while self._running:
                 if not msvcrt.kbhit():
                     time.sleep(0.02)
                     continue
-                ch = msvcrt.getwch()
-                if ch in ("\x00", "\xe0"):
-                    code = msvcrt.getwch()
-                    mapped = arrow_map.get(code)
-                    if mapped:
-                        self.handle_key(mapped, loop=loop)
-                else:
-                    self.handle_key(ch, loop=loop)
+                # getwch() returns a UTF-16 code unit; draw only complete characters.
+                unit = msvcrt.getwch().encode("utf-16-le", errors="surrogatepass")
+                for ch in decoder.decode(unit):
+                    if ch in ("\x00", "\xe0"):
+                        mapped = arrow_map.get(msvcrt.getwch())
+                        if mapped:
+                            self.handle_key(mapped, loop=loop)
+                    else:
+                        self.handle_key(ch, loop=loop)
             return
 
         fd = sys.stdin.fileno()
