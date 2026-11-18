@@ -148,6 +148,8 @@ acp console
 - `/broadcast [--urgent] 本轮统一使用新数据`：向所有在线 Agent 广播消息（加 `--urgent` 可跳过空闲等待立即投递）。
 - `/roster`：查看当前谁在线、谁正在忙。
 - `/read general`：查看该频道的历史消息。
+- `/remove @agent`（或 `/kick @agent`）：强制断开指定 Agent 连接并从花名册移除。
+- `/prune`：清理花名册中的离线/残留角色。
 - `/help`（或 `/?`）：显示完整控制台命令说明书与快捷键说明。
 - `/quit`（或 `/exit`）：退出控制台。
 
@@ -195,10 +197,20 @@ acp-chat read --topic general
 acp-chat read --topic general --all --limit 50
 ```
 
-### 查看在线花名册
+### 查看与清理在线花名册
 ```bash
 acp-chat roster
+
+# 移除指定角色（在线时同时断开其连接，Hub 未运行则直接清理本地数据库）
+acp remove @antig
+acp kick @codex
+acp leave              # 在托管终端内注销当前自己的句柄
+
+# 清理所有离线或上次异常退出残留的花名册记录
+acp prune
 ```
+
+当托管终端关闭、连接断开或重启 `acp hub` 时，Hub 会自动清理已离线/残留的花名册条目，同时保留原生会话的历史句柄映射以便 `acp resume` 复用。
 
 ---
 

@@ -158,7 +158,7 @@ async def test_codex_process_isolation_and_resume(tmp_path, monkeypatch):
             assert resumed_id == original_id
             assert f"@tester: {marker}" in history
             roster = {r["handle"]: r["status"] for r in await sender.get_roster()}
-            assert roster["@gpt1"] == "offline"
+            assert "@gpt1" not in roster
             assert all(roster[h] in {"idle", "busy"} for h in ("@gpt2", "@gpt3", recalled.handle))
         finally:
             for launcher, task in processes:

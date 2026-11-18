@@ -4,7 +4,7 @@ ACP Storage Engine - SQLite Persistence for Messages, Cursors & Roster
 
 import os
 import sqlite3
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterable
 from .protocol import Message, MessageMode, SessionKey, get_utc_now_iso
 
 
@@ -273,3 +273,53 @@ class Storage:
                 {"handle": r["handle"], "status": r["status"], "last_seen": r["last_seen"]}
                 for r in rows
             ]
+
+    def remove_roster(self, handle: str, *, remove_session: bool = False) -> bool:
+        """Remove a handle from the roster (and optionally its saved session mapping)."""
+        cleaned = handle.strip().lstrip("@")
+        if not cleaned:
+            return False
+        norm = "@" + cleaned
+        with self._get_connection() as conn:
+            deleted = conn.execute(
+                "DELETE FROM roster WHERE LOWER(handle) = LOWER(?)", (norm,)
+            ).rowcount
+            if remove_session:
+                deleted += conn.execute(
+                    "DELETE FROM session_handles WHERE LOWER(handle) = LOWER(?)", (norm,)
+                ).rowcount
+            conn.commit()
+        return deleted > 0
+
+    def clear_roster(self) -> int:
+        """Remove all entries from the active roster while keeping saved session history."""
+        with self._get_connection() as conn:
+            cursor = conn.execute("DELETE FROM roster")
+            conn.commit()
+            return cursor.rowcount
+
+    def prune_offline_roster(self, online_handles: Iterable[str] = ()) -> List[str]:
+        """Remove offline or disconnected entries from the active roster."""
+        online = {
+            "@" + h.strip().lstrip("@").lower()
+            for h in online_handles
+            if h and h.strip().lstrip("@")
+        }
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT handle, status FROM roster").fetchall()
+            removed = sorted(
+                r["handle"]
+                for r in rows
+                if r["status"].lower() == "offline" or r["handle"].lower() not in online
+            )
+            if removed:
+                placeholders = ",".join("?" for _ in removed)
+                conn.execute(f"DELETE FROM roster WHERE handle IN ({placeholders})", removed)
+                conn.commit()
+        return removed
+
+    def get_session_handles(self) -> set[str]:
+        """Return all lowercase handles currently bound to historical sessions."""
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT handle FROM session_handles").fetchall()
+            return {row["handle"].lower() for row in rows}

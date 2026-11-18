@@ -10,6 +10,7 @@ import queue
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -490,7 +491,7 @@ class AgentLauncher:
                         if self.session and self.pty_proc.exitstatus:
                             raise ValueError(f"Native resume exited with status {self.pty_proc.exitstatus}")
                         break
-                    if self.needs_claim and not self.client.connected:
+                    if not self.client.connected:
                         raise ConnectionError("Lost the Hub connection owning this handle")
                     if self.activity.app and not self.interactive and not self.activity.started:
                         self._advance_startup(time.monotonic())
@@ -542,4 +543,23 @@ def launch_agent(
         session_id=session_id,
         output_status=output_status,
     )
-    asyncio.run(launcher.run())
+    previous_handlers = {}
+
+    def _stop(_signum, _frame):
+        launcher._running = False
+
+    for sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is not None:
+            try:
+                previous_handlers[sig] = signal.signal(sig, _stop)
+            except (OSError, ValueError):
+                pass
+    try:
+        asyncio.run(launcher.run())
+    finally:
+        for sig, prev in previous_handlers.items():
+            try:
+                signal.signal(sig, prev)
+            except (OSError, ValueError):
+                pass

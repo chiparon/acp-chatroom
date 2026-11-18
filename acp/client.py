@@ -233,6 +233,12 @@ class ACPClient:
         }
         return await self.request(payload)
 
+    async def remove_agent(self, target: str) -> Dict[str, Any]:
+        return await self.request({"action": ActionType.REMOVE.value, "target": target})
+
+    async def prune_roster(self) -> Dict[str, Any]:
+        return await self.request({"action": ActionType.PRUNE.value})
+
 
 # Synchronous convenience wrappers for one-shot CLI commands
 def sync_send(

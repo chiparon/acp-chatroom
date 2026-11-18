@@ -1,6 +1,6 @@
 import os
 import tempfile
-from acp.protocol import Message, MessageMode, format_explicit_prompt
+from acp.protocol import Message, MessageMode, SessionKey, format_explicit_prompt
 from acp.storage import Storage
 
 
@@ -81,3 +81,37 @@ def test_storage_basic():
 
 if __name__ == "__main__":
     test_storage_basic()
+
+
+def test_storage_roster_cleanup(tmp_path):
+    db_path = str(tmp_path / "cleanup.db")
+    storage = Storage(db_path)
+    key = SessionKey("host-a", "codex", "/scope", "11111111-1111-1111-1111-111111111111")
+
+    storage.update_roster("@codex", "idle", key)
+    storage.update_roster("@antig", "busy")
+    storage.update_roster("@stale_offline", "offline")
+    assert storage.get_session_handles() == {"@codex"}
+
+    # Prune keeps @codex (online), drops @antig (not in online_handles) and @stale_offline (offline).
+    pruned = storage.prune_offline_roster(["@codex"])
+    assert pruned == ["@antig", "@stale_offline"]
+    assert [r["handle"] for r in storage.get_roster()] == ["@codex"]
+    assert storage.previous_handle(key) == "@codex"
+
+    # Removing without remove_session preserves session_handles for `acp resume`.
+    assert storage.remove_roster("CODEX")
+    assert storage.get_roster() == []
+    assert storage.previous_handle(key) == "@codex"
+
+    # Removing with remove_session deletes the saved session binding too.
+    assert storage.remove_roster("@codex", remove_session=True)
+    assert storage.previous_handle(key) is None
+    assert not storage.remove_roster("@nonexistent", remove_session=True)
+
+    # clear_roster drops roster entries but retains session_handles.
+    storage.update_roster("@codex", "idle", key)
+    storage.update_roster("@claudecode", "busy")
+    assert storage.clear_roster() == 2
+    assert storage.get_roster() == []
+    assert storage.previous_handle(key) == "@codex"

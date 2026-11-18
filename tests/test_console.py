@@ -223,3 +223,39 @@ def test_read_message_spacing_in_console_and_cli(monkeypatch):
     assert "@codex:\n    first update [1]\n\n  2026-11-15 12:01:02 [EXP] @claude:\n    second reply" in cli_out
 
 
+def test_console_remove_and_prune_commands(monkeypatch):
+    hc, buf = _make_test_console(width=100, dock_active=False)
+    hc.roster_state = {"@codex": "idle", "@claude": "busy", "@stale": "offline"}
+    removed_targets = []
+
+    async def fake_remove(target):
+        removed_targets.append(target)
+        return {"status": "ok", "handle": "@" + target.lstrip("@"), "was_online": True}
+
+    async def fake_prune():
+        return {"status": "ok", "removed": ["@stale"], "count": 1}
+
+    hc.client.remove_agent = AsyncMock(side_effect=fake_remove)
+    hc.client.prune_roster = AsyncMock(side_effect=fake_prune)
+    monkeypatch.setattr(hc, "_schedule", lambda coro, loop: asyncio.run(coro))
+
+    assert hc.handle_command("/remove")
+    assert "Usage: /remove @agent" in buf.getvalue()
+
+    buf.seek(0)
+    buf.truncate(0)
+    assert hc.handle_command("/remove @codex")
+    assert hc.handle_command("/kick claude")
+    assert removed_targets == ["@codex", "claude"]
+    assert "@codex" not in hc.roster_state
+    assert "@claude" not in hc.roster_state
+    assert "Removed @codex" in buf.getvalue()
+    assert "Removed @claude" in buf.getvalue()
+
+    buf.seek(0)
+    buf.truncate(0)
+    assert hc.handle_command("/prune")
+    assert "@stale" not in hc.roster_state
+    assert "Pruned 1 offline agent(s): @stale" in buf.getvalue()
+
+

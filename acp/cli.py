@@ -16,6 +16,7 @@ from .client import ACPClient, sync_send, sync_read, sync_roster
 from .protocol import ActionType, MessageMode
 from .agents import agent_registry
 from .skills_generator import init_workspace_skills, install_skill
+from .storage import Storage
 
 rich_console = Console()
 
@@ -300,6 +301,58 @@ def model_command(model_id, target, uri):
     if result.get("status") != "ok":
         raise click.ClickException(result.get("error", "Model command failed"))
     click.echo(f"Sent model selection {model_id} to {target}")
+
+
+@cli.command("remove")
+@click.argument("handle", required=False)
+@click.option("--as", "-a", "self_handle", envvar="ACP_AGENT_HANDLE", default=None,
+              help="Handle to remove (defaults to ACP_AGENT_HANDLE)")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--db", default="acp_chatroom.db", help="Fallback SQLite database path when Hub is offline")
+def remove_command(handle, self_handle, uri, db):
+    """Remove an agent from the roster (disconnects it if online)."""
+    target = handle or self_handle
+    if not target or not target.strip().lstrip("@"):
+        raise click.UsageError("Provide HANDLE or set --as / ACP_AGENT_HANDLE")
+    target = "@" + target.strip().lstrip("@")
+    try:
+        result = asyncio.run(ACPClient(uri).request({"action": ActionType.REMOVE.value, "target": target}))
+    except OSError:
+        if not Path(db).exists():
+            raise click.ClickException(f"Hub at {uri} is offline and database {db} was not found")
+        if not Storage(db).remove_roster(target, remove_session=True):
+            raise click.ClickException(f"Handle {target} not found in {db}")
+        click.echo(f"Removed {target} from offline database {db}")
+        return
+    if result.get("status") != "ok":
+        raise click.ClickException(result.get("error", "Remove failed"))
+    click.echo(f"Removed {result['handle']}")
+
+
+cli.add_command(remove_command, name="kick")
+cli.add_command(remove_command, name="leave")
+
+
+@cli.command("prune")
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
+@click.option("--db", default="acp_chatroom.db", help="Fallback SQLite database path when Hub is offline")
+def prune_command(uri, db):
+    """Remove all offline or stale agents from the roster."""
+    try:
+        result = asyncio.run(ACPClient(uri).request({"action": ActionType.PRUNE.value}))
+    except OSError:
+        if not Path(db).exists():
+            raise click.ClickException(f"Hub at {uri} is offline and database {db} was not found")
+        count = Storage(db).clear_roster()
+        click.echo(f"Cleared {count} stale entry(ies) from offline database {db}")
+        return
+    if result.get("status") != "ok":
+        raise click.ClickException(result.get("error", "Prune failed"))
+    removed = result.get("removed", [])
+    if removed:
+        click.echo(f"Pruned {len(removed)} offline agent(s): {', '.join(removed)}")
+    else:
+        click.echo("No offline agents to prune.")
 
 
 def main():
