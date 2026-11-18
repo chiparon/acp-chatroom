@@ -185,15 +185,12 @@ def test_persistent_online_agents_bar_updates_with_roster_and_presence():
     initial_lines, _, _ = hc.render_dock_lines(width=100)
     assert "Online Agents (0): none" in initial_lines
 
-    hc.client.get_roster = AsyncMock(
-        return_value=[
-            {"handle": "@user", "status": "idle", "last_seen": "2026-11-15T12:00:00"},
-            {"handle": "@codex", "status": "idle", "last_seen": "2026-11-15T12:00:00"},
-            {"handle": "@claude", "status": "busy", "last_seen": "2026-11-15T12:00:00"},
-            {"handle": "@agy", "status": "offline", "last_seen": "2026-11-15T11:55:00"},
-        ]
-    )
-    asyncio.run(hc.show_roster())
+    hc._display_roster([
+        {"handle": "@user", "status": "idle", "last_seen": "2026-11-15T12:00:00"},
+        {"handle": "@codex", "status": "idle", "last_seen": "2026-11-15T12:00:00"},
+        {"handle": "@claude", "status": "busy", "last_seen": "2026-11-15T12:00:00"},
+        {"handle": "@agy", "status": "offline", "last_seen": "2026-11-15T11:55:00"},
+    ])
     dock_after_roster, _, _ = hc.render_dock_lines(width=100)
     assert any("Online Agents (2): @claude [BUSY] · @codex [IDLE]" in line for line in dock_after_roster)
 

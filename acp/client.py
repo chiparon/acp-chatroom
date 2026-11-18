@@ -19,12 +19,15 @@ from .protocol import (
 )
 
 
+ResponseHandler = Callable[[Dict[str, Any]], None]
+
+
 class ACPClient:
     def __init__(self, uri: str = "ws://127.0.0.1:8765", handle: Optional[str] = None):
         self.uri = uri
         self.handle = handle if not handle or handle.startswith("@") else f"@{handle}"
         self.ws: Optional[WebSocketClientProtocol] = None
-        self._pending_requests: Dict[str, asyncio.Future] = {}
+        self._pending_requests: Dict[str, tuple[asyncio.Future, Optional[ResponseHandler]]] = {}
         self.supports_model_switch = False
         self._listener_task: Optional[asyncio.Task] = None
         self.event_handlers: Dict[str, List[Callable[[Dict[str, Any]], Any]]] = {
@@ -101,9 +104,15 @@ class ACPClient:
                     data = json.loads(raw)
                     req_id = data.get("req_id")
                     if req_id and req_id in self._pending_requests:
-                        fut = self._pending_requests.pop(req_id)
+                        fut, on_response = self._pending_requests.pop(req_id)
                         if not fut.done():
-                            fut.set_result(data)
+                            try:
+                                if on_response is not None:
+                                    on_response(data)
+                            except Exception as exc:
+                                fut.set_exception(exc)
+                            else:
+                                fut.set_result(data)
                     elif "event" in data:
                         self._dispatch_event(data)
                 except json.JSONDecodeError:
@@ -112,12 +121,15 @@ class ACPClient:
             pass
         finally:
             # Cancel any pending futures
-            for fut in self._pending_requests.values():
+            for fut, _ in self._pending_requests.values():
                 if not fut.done():
                     fut.cancel()
             self._pending_requests.clear()
 
-    async def request(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def request(
+        self, payload: Dict[str, Any], *, on_response: Optional[ResponseHandler] = None,
+    ) -> Dict[str, Any]:
+        """Send a request and run its optional handler in receive order."""
         req_id = uuid.uuid4().hex[:8]
         payload["req_id"] = req_id
 
@@ -129,7 +141,7 @@ class ACPClient:
 
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        self._pending_requests[req_id] = fut
+        self._pending_requests[req_id] = (fut, on_response)
 
         try:
             await self.ws.send(json.dumps(payload))
@@ -201,9 +213,16 @@ class ACPClient:
         resp = await self.request(payload)
         return resp.get("messages", [])
 
-    async def get_roster(self) -> List[Dict[str, Any]]:
+    async def get_roster(
+        self, *, on_roster: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    ) -> List[Dict[str, Any]]:
         payload = {"action": ActionType.ROSTER.value}
-        resp = await self.request(payload)
+
+        def receive(response):
+            if on_roster is not None and "roster" in response:
+                on_roster(response["roster"])
+
+        resp = await self.request(payload, on_response=receive)
         return resp.get("roster", [])
 
     async def set_presence(self, status: AgentStatus) -> Dict[str, Any]:
