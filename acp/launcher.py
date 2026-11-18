@@ -177,16 +177,30 @@ class AgentLauncher:
         # Keep message content from terminating a paste or issuing terminal controls.
         text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", "", text)
         if self.profile and self.pty_proc:
-            # One editor paste and one Enter, including for multiline messages.
+            # Keep operator input out of the composer until the message is submitted.
             with self._lock:
-                self._write(f"\x1b[200~{text}\x1b[201~")
-                # Codex on ConPTY folds an immediate Enter into its paste burst.
-                # Keep operator input out of the editor until this turn is submitted.
                 if os.name == "nt" and self.profile.executable == "codex":
-                    self._wait_codex_paste()
-                self._write("\r")
+                    self._write_codex_prompt(text)
+                else:
+                    self._write(f"\x1b[200~{text}\x1b[201~")
+                    self._write("\r")
         else:
             self.write_input(text)
+
+    def _write_codex_prompt(self, text: str) -> None:
+        # Win32 input mode: VK_RETURN, scan code 28, CR, key down/up,
+        # modifier bits (16 = SHIFT_PRESSED), repeat count 1.
+        shift_enter = "\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_"
+        enter = "\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_"
+        for index, line in enumerate(text.split("\n")):
+            if index:
+                self._write(shift_enter)
+            # Bound pending ConPTY input so Enter cannot catch the paste burst.
+            for offset in range(0, len(line), 48):
+                self._write(f"\x1b[200~{line[offset:offset + 48]}\x1b[201~")
+                time.sleep(0.035)
+        self._wait_codex_paste(settle=0.6)
+        self._write(enter)
 
     def on_explicit_message(self, event_data: dict) -> None:
         """Callback when an explicit message arrives for this agent from ACP Hub."""

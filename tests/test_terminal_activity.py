@@ -98,11 +98,11 @@ def test_interactive_cursor_reply_bypasses_paste_lock_and_extends_settle(monkeyp
 
     driver = threading.Thread(target=simulate_tui_and_host, daemon=True)
     driver.start()
-    launcher.inject_prompt("hello\nworld")
+    launcher.inject_prompt("hello")
     driver.join(timeout=2)
 
     texts = [text for _, text in events]
-    assert texts == ["\x1b[200~hello\nworld\x1b[201~", "\x1b[21;5R", "\r", "x"]
+    assert texts == ["\x1b[200~hello\x1b[201~", "\x1b[21;5R", "\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_", "x"]
     t_reply = events[1][0]
     t_enter = events[2][0]
     assert t_enter - t_reply >= 0.25

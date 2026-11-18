@@ -40,7 +40,7 @@ def main():
             sys.stdout.write("\x1b]7501;state=idle:app=codex\x07")
             sys.stdout.flush()
             (root / "keys").touch()
-        if "\x1b[201~\r" in received:
+        if "second line  \x1b[201~\r" in received:
             (root / "pasted").touch()
     (root / "input.json").write_text(json.dumps([sys.argv[1:], received]), "utf-8")
     subprocess.run(["acp-chat", "send", "--to", "@tester", "--mode", "explicit", "received"], check=True)

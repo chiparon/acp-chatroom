@@ -43,9 +43,14 @@ def test_multiline_paste_is_atomic_and_submits_once():
     launcher.pty_proc.write.assert_not_called()
     event["message"].update(target="worker", content=" 一\r\n二\x1b[201~ ")
     launcher.on_explicit_message(event)
-    assert [c.args[0] for c in launcher.pty_proc.write.call_args_list] == [
-        "\x1b[200~@one:  一\n二[201~ \x1b[201~", "\r",
-    ]
+    writes = [c.args[0] for c in launcher.pty_proc.write.call_args_list]
+    if os.name == "nt":
+        assert writes == [
+            "\x1b[200~@one:  一\x1b[201~", "\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_",
+            "\x1b[200~二[201~ \x1b[201~", "\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_",
+        ]
+    else:
+        assert writes == ["\x1b[200~@one:  一\n二[201~ \x1b[201~", "\r"]
 
 
 @pytest.mark.parametrize("name", ["codex", "agy", "claude", "dsh"])
