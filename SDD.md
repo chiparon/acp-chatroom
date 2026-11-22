@@ -1,7 +1,7 @@
 # 软件设计文档 (SDD): 统一 Hub + Console 类 Claude Code 交互终端
 
-> **分支**: `feat/unified-console-tui`（基于 `main`）  
-> **状态**: 待审阅（Draft for Review）  
+> **分支**: `feat/unified-console-tui`（基线提交 `388ad2b`，已包含 PR #16/#17/#18）  
+> **状态**: 修订版（已整合全量代码审计意见，待最终确认）  
 > **关联文档**: [TDD.md](./TDD.md) · [REQUIREMENTS.md](./REQUIREMENTS.md)
 
 ---
@@ -10,13 +10,13 @@
 
 当前 ACP Chatroom 需要用户先在终端 A 运行 `acp hub`，再到终端 B 运行 `acp console`，使用链路较割裂；同时存在以下交互痛点：
 1. **状态变更刷屏**：每次 Agent 上线、空闲、忙碌、离线都会在主消息流中打印 `• Presence: @xx is now IDLE/BUSY`，导致真实对话内容被状态日志冲刷。
-2. **成员辨识度低**：成员发言均为纯文本单色/浅色前缀，多 Agent 协同对话时缺乏如 Claude Code 般的视觉人格与对话层次感。
-3. **启动不够开箱即用**：直接运行 `acp` 仅输出帮助文本，无法像 `claude` / `codex` CLI 一样直接进入可交互终端。
+2. **成员辨识度低**：成员发言均为纯文本前缀，多 Agent 协同对话时缺乏类似 Claude Code 的视觉人格与对话层次感；且人类自己发送 `/send` 或普通 `/broadcast` 时缺乏统一的消息卡片展示。
+3. **启动不够开箱即用**：直接运行 `acp` 仅输出帮助文本，无法像 `claude` / `codex` CLI 一样一步直达交互终端。
 
-本设计旨在将 **`acp hub` 与 `acp console` 合并为单进程一体化的类 Claude Code CLI 终端**，核心目标如下：
-- **一键直达主界面**：运行 `acp`、`acp hub`（交互式终端）或 `acp console` 时，均直接启动 Console TUI；若本地端口尚无 Hub 实例，自动同进程拉起内嵌 `ACPHub`；若端口已有 Hub 运行，则无缝退化为客户端模式连入。保留 `acp hub --headless` 及非 TTY 自动降级，保障后台/CI 场景兼容。
-- **右上角固定在线花名册悬浮面板**：通过 ANSI 屏幕坐标与保存/恢复光标机制，将聊天室在线成员及状态灯（`🟢 IDLE`、`🟡 BUSY`、`🔵 STARTING`、`🔴 BLOCKED`）固定悬挂在终端右上角，彻底取消主消息流中的 `Presence: @xx is now XX` 文本刷屏。
-- **成员像素/方块小人头像系统**：为每位发言成员（Claude、Codex、Antigravity、DeepSeek、Human 及自定义句柄）渲染 3 行高彩色 Unicode 半块像素小人头像与并排对齐的消息卡片，覆盖实时消息与 `/read` 历史阅读。
+本设计将 **`acp hub` 与 `acp console` 合并为单进程一体化的类 Claude Code CLI 终端**，核心目标如下：
+- **一键直达主界面**：运行 `acp`（无子命令）、`acp hub`（交互式终端）或 `acp console` 时，均直接启动统一 Console TUI；若本地端口尚无 Hub 实例，自动同进程拉起内嵌 `ACPHub`；若端口已有存活的 ACP Hub，则无缝附着为客户端模式连入。保留 `acp hub --headless` 及非 TTY 自动降级，保障后台/CI 场景兼容。
+- **顶部固定通栏 + `DECSTBM` 滚动区（右上角固定在线情况）**：利用 VT100 滚动区（`\x1b[{top};{bottom}r`）锁定顶部 2 行固定通栏（左侧展示 Hub 运行模式与地址，**右侧固定展示聊天室在线成员及单列着色状态灯**）与底部 3 行固定输入 Dock（提示符 **`@user::> `**），中间区域自然滚动。彻底消灭主消息流中的 `• Presence: @xx is now XX` 刷屏，同时避免悬浮矩形带来的滚屏残影与右侧留白浪费。
+- **成员像素/方块小人头像系统**：为每位发言成员（Claude、Codex、Antigravity、DeepSeek、Human 及自定义句柄）渲染 3 行高彩色 Unicode 半块像素小人头像与并排对齐的消息卡片，覆盖实时显式/静默/广播消息、人类自身发言及 `/read` 历史阅读。
 
 ---
 
@@ -24,154 +24,184 @@
 
 ### 2.1 运行模式与拓扑关系
 
-合并后的 CLI 支持在**单进程同事件循环**内协同运行 `ACPHub` 与 `HumanConsole`，同时保留独立的 Headless Hub 与跨终端接入能力：
+合并后的 CLI 支持在**单进程同 `asyncio` 事件循环**内协同运行 `ACPHub` 与 `HumanConsole`，同时保留独立的 Headless Hub 与跨终端接入能力：
 
 ```text
-                       +-----------------------------------+
-                       |  acp / acp hub / acp console      |
-                       +-----------------+-----------------+
-                                         |
-                        探测目标 URI 端口是否已被 Hub 监听
-                         /                               \
-            [未占用 / 本地 host 模式]                [已有 Hub 在线 / client 模式]
-                       /                                   \
-  +-----------------------------------+       +-----------------------------------+
-  | 单进程 Unified Console (owns_hub)  |       | Console 客户端模式 (client only)   |
-  |  ├─ asyncio Task: 内嵌 ACPHub     |       |  └─ ACPClient ──► 外部已有 Hub    |
-  |  └─ 协程: HumanConsole (本地 WS)  |       +-----------------------------------+
-  +-----------------------------------+
-            ^                 ^
-            | (WebSocket)     | (WebSocket)
-  +-----------------+ +-----------------+
-  | acp launch agy  | | acp launch codex|
-  +-----------------+ +-----------------+
+                       +---------------------------------------+
+                       |  acp / acp hub / acp console          |
+                       +-------------------+-------------------+
+                                           |
+                        WebSocket PING 协议探测（短超时 0.8s）
+                        /                  |                   \
+          [ConnectionRefused]       [返回 PONG 帧]         [非 ACP 服务占口 / 握手失败]
+             /           \                 |                              |
+     [本地回环且允许]  [远端/--no-auto]     v                              v
+            |                |     +-------------------------+     直接报错退出
+            v                v     | Console 客户端模式       |    （明确提示端口被
+  +-----------------------+ 报错   | (owns_hub=False)        |     非 ACP 进程占用）
+  | 单进程 Unified Console | 退出   | └─ ACPClient ─► 外部Hub |
+  | (owns_hub=True)       |        +-------------------------+
+  | ├─ 内嵌 ACPHub        |
+  | └─ HumanConsole (WS)  |
+  +-----------------------+
+        ^             ^
+        | (WS)        | (WS)
+  +-----------+ +-----------+
+  | acp launch| | acp launch|
+  |   agy     | |   codex   |
+  +-----------+ +-----------+
 ```
 
 ### 2.2 CLI 路由设计 (`acp/cli.py`)
 
 1. **根命令组 (`@click.group(invoke_without_command=True)`)**：
-   - 增加 `@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")` 与 `@click.option("--as", "--handle", "-a", "handle", default="@user")`（或配合子命令 `ctx.invoked_subcommand is None` 判定）。
-   - 当用户直接执行 `acp`（未传任何子命令）时，若处于交互式 TTY，调用 `start_unified_console(uri=uri, handle=handle)` 直接启动 Console 页面；非 TTY 环境或带 `--help` 时按常规输出帮助信息（或遵循 `start_unified_console` 的非 TTY 行为）。
+   - 根组支持可选参数 `--uri`（`envvar="ACP_HUB_URI"`, 默认 `None` 以区分显式传参）、`--as` / `--handle` / `-a`（默认 `None`）、`--db`（默认 `"acp_chatroom.db"`），通过 `ctx.ensure_object(dict)` 透传给子命令作为回退默认值，避免 `acp --as @alice console` 场景下参数被根组吞掉。
+   - 当 `ctx.invoked_subcommand is None`（即裸输 `acp` 或 `acp-chat`）：
+     - 若处于交互式 TTY（`sys.stdin.isatty() and sys.stdout.isatty()`）：调用 `start_unified_console(uri=effective_uri, handle=effective_handle, db_path=db, auto_hub=True)` 直接启动统一终端。
+     - 若处于非 TTY 环境（如管道、CI 脚本调用）：输出 `click.echo(ctx.get_help())` 并正常退出，避免卡死脚本。
+   - 说明：`pyproject.toml` 中 `acp` 与 `acp-chat` 共享 `acp.cli:main` 入口，二者在无参 TTY 下行为一致，在非 TTY 或带子命令（如 `acp-chat send`）时保持 100% 兼容。
 2. **`acp hub` 命令**：
    - 保留 `--host`（默认 `127.0.0.1`）、`--port`（默认 `8765`）、`--db`（默认 `acp_chatroom.db`）。
-   - 新增 `--headless`（`is_flag=True`）和 `--as` / `--handle` / `-a`（默认 `@user`）。
+   - 新增 `--headless`（`is_flag=True`）与 `--as` / `--handle` / `-a`（默认 `@user`）。
+   - **环境隔离**：`acp hub` 始终根据自身 `--host` 与 `--port` 构造连接地址，**绝不被环境变量 `ACP_HUB_URI` 劫持**；当 `--host` 为 `0.0.0.0` 或 `::` 时，内嵌 Hub 绑定该通配接口，本地 Console 客户端连接地址自动映射为 `ws://127.0.0.1:{port}`（IPv6 通配映射为 `ws://[::1]:{port}`）。
    - 分支策略：
-     - 当 `--headless` 为真，或当前标准输入/输出非交互式 TTY（如 CI 流水线、后台守护进程重定向）时，调用 `run_hub(host=host, port=port, db_path=db)` 运行纯后台服务端。
-     - 当处于交互式 TTY 且未指定 `--headless` 时，构造 `ws://{connect_host}:{port}`（若 `host` 为 `0.0.0.0` 或 `::`，客户端连接地址映射为 `127.0.0.1`），调用 `start_unified_console(uri=..., handle=handle, host=host, port=port, db_path=db, require_hub_ownership=True/auto)` 直接进入包含内嵌 Hub 的 Console TUI。
+     - 当 `--headless` 为真，或非交互式 TTY 时，运行原有 `run_hub(host=host, port=port, db_path=db)` 纯后台模式。
+     - 当处于交互式 TTY 且未传 `--headless` 时，调用 `start_unified_console(uri=connect_uri, handle=handle, bind_host=host, bind_port=port, db_path=db, auto_hub=True, explicit_hub_options=(db != "acp_chatroom.db" or host != "127.0.0.1"))`。若目标端口已有运行中的 ACP Hub，则自动以 `client` 模式附着，并在启动 Banner 中给出明显提示（尤其是用户显式传了非默认 `--db` 或 `--host` 时，明确提醒当前正在附着外部 Hub 而未启用新数据库）。
 3. **`acp console` 命令**：
-   - 保留 `--uri`（默认 `ws://127.0.0.1:8765`）、`--as`/`--handle`（默认 `@user`）。
-   - 新增可选参数 `--db`（默认 `acp_chatroom.db`）和 `--no-auto-hub`（可选显式关闭自动拉起，默认允许自动探测并拉起本地 Hub）。
-   - 调用 `start_unified_console(uri=uri, handle=handle, db_path=db)`。
+   - 保留 `--uri`（`envvar="ACP_HUB_URI"`, 默认 `ws://127.0.0.1:8765`）、`--as` / `--handle` / `-a`（默认 `@user`）。
+   - 新增 `--db`（默认 `acp_chatroom.db`）和 `--no-auto-hub`（`is_flag=True`，关闭自动拉起本地 Hub，强制仅客户端连接）。
+   - 调用 `start_unified_console(uri=uri, handle=handle, db_path=db, auto_hub=not no_auto_hub)`。
 
-### 2.3 自动探测、启动与协同关闭生命周期
+### 2.3 三态协议探测、内嵌 Hub 生命周期与日志隔离
 
-在 `acp/console.py`（及 `acp/hub.py` 辅助接口）中实现 `UnifiedConsoleRunner` / `start_unified_console(...)`：
+在 `acp/console.py`（及 `acp/hub.py` 辅助能力）中实现 `UnifiedConsoleRunner` 与 `start_unified_console(...)`：
 
-1. **URI 解析与端口探测**：
-   - 解析 `uri`（如 `ws://127.0.0.1:8765`）提取 `scheme`、`host`、`port`。
-   - 先尝试轻量级探测目标地址是否已有服务响应（例如尝试 TCP 连接或发起一次短超时的 `ACPClient.request({"action": "ping"})`）：
-     - **已有 Hub 在线**：记录 `owns_hub = False`，直接以客户端模式连接 `HumanConsole`，跳过本地启动 Hub。
-     - **目标未监听且为本地回环/可绑定地址**（如 `127.0.0.1`、`localhost`、`0.0.0.0`、`::1`）：创建内嵌 `ACPHub(host=bind_host, port=port, db_path=db_path)`，在同一 `asyncio` 事件循环中先 `await hub.start()`，记录 `owns_hub = True`。若绑定端口恰好出现竞态占用（`OSError`），回退重试客户端探测连接。
-     - **目标为远端主机且不可达**：不尝试本地绑定远端 IP，直接进入客户端连接并给出明确错误提示。
-2. **日志静默保护 (TUI Log Isolation)**：
-   - 当 `owns_hub == True` 运行于 TUI 模式时，`acp.hub`、`websockets`、`websockets.server` 的 Logger 若继续向 `stdout/stderr` 打印 `INFO` 日志，会直接撕裂终端的滚动区与悬浮窗。
-   - 因此内嵌启动 Hub 时：
-     - 不调用向控制台输出文本的 `logging.basicConfig(...)`（不同于 `run_hub()` 的 headless 模式）。
-     - 显式将 `logging.getLogger("acp.hub")` 与 `logging.getLogger("websockets")` 在交互式 TUI 运行期间的传播或控制台 Handler 设为静默（或重定向至可选日志文件 / `NullHandler`），退出 TUI 时恢复原日志级别。
-3. **统一启动顺序与优雅退出 (`try ... finally`)**：
-   - 启动顺序：`await hub.start()`（若 `owns_hub`） ➔ `await console.run()`（内部连接 `ACPClient` 并立即拉取一次 `get_roster()` 初始化右上角花名册）。
-   - 退出触发：用户在输入框输入 `/quit`、`/exit`、`:q` 或按 `Ctrl+C` / 空行 `Ctrl+D`。
-   - 清理顺序：
-     1. 停止接收键盘输入，清理底部 Dock 与右上角悬浮卡片。
-     2. `await console.client.close()` 断开控制台 WebSocket 连接。
-     3. 若 `owns_hub == True`：执行 `await hub.stop()`，优雅关闭 `websockets` Server、清理花名册在线状态并关闭 SQLite 连接；若 `owns_hub == False`：仅退出本控制台，**绝对不关闭外部共享 Hub**。
-   - **Banner 状态标注**：启动 Banner 展示当前 Hub 运行模式（例如 `Hub: Embedded (ws://127.0.0.1:8765)` 或 `Hub: Attached (ws://127.0.0.1:8765)`），让操作者清晰知晓关闭当前终端是否会终止房间服务。
+1. **WebSocket 协议层三态探测 (`probe_hub(uri, timeout=0.8)`)**：
+   - 使用 `websockets.connect(uri)` 发送 `{"action": "ping", "req_id": ...}` 并校验回包 `event == "pong"`（整个探测受 `asyncio.wait_for(..., timeout=0.8)` 限制），精确区分三种结果：
+     - **`ALIVE_HUB`**：收到合法 `pong` ➔ 目标已是存活 ACP Hub ➔ `owns_hub = False`，直接附着连接。
+     - **`PORT_FREE`**：连接被拒绝（`ConnectionRefusedError` / 本地端口无监听）：
+       - 若 `auto_hub=True` 且目标为本地回环/可绑定地址（`127.0.0.1`、`localhost`、`::1`、`0.0.0.0`、`::`）：在同事件循环内创建并 `await hub.start()`，记录 `owns_hub = True`。
+       - 若目标为 `port=0`（供自动化测试动态分配空闲端口）：直接跳过探测启动内嵌 `ACPHub(host=bind_host, port=0, db_path=db_path)`，启动后读取 `hub.bound_port` 回填给 `HumanConsole.uri` 与 `ACPClient.uri`，杜绝端口竞态。
+       - 若并发启动时绑定发生 `OSError`（`EADDRINUSE`）：立即重做一次 `probe_hub`；若已变为 `ALIVE_HUB` 则回退为附着模式，否则抛出明确错误。
+       - 若 `auto_hub=False` 或目标为远端主机 IP/域名：绝不尝试本地绑定，直接输出清晰错误并退出。
+     - **`PORT_OCCUPIED_NON_ACP`**：TCP 已连通但 WebSocket 握手失败、超时或未返回 `pong` ➔ **立即报错退出**（提示端口被非 ACP 服务占用），防止误附着或静默挂起。
+2. **TUI 期间完整日志隔离 (`_silence_embedded_hub_logging`)**：
+   - 当 `owns_hub == True` 运行于 TUI 模式时，使用上下文管理器隔离 `acp.hub`、`websockets`、`websockets.server`、`websockets.protocol` Logger：
+     - 保存原 `handlers`、`level`、`propagate`；
+     - 设为 `propagate = False`（阻止冒泡到 root logger），替换为一个有界内存环形缓冲 Handler（如 `collections.deque(maxlen=200)`，**彻底阻止 Python `lastResort` 将 `WARNING`/`ERROR` 打印到 `stderr` 撕裂 TUI**）；
+     - 退出 TUI 时完整还原原 Logger 配置。
+     - 可选支持 `/logs` 控制台指令按需查看内存中的最近内嵌 Hub 日志（排查连接问题时非常实用）。
+3. **快速优雅退出与 `ACPHub.stop()` 改进 (`acp/hub.py`)**：
+   - 启动顺序：
+     1. 探测或拉起内嵌 `ACPHub`（`owns_hub` 已确定）；
+     2. 建立 `ACPClient` 连接并注册（`role="console"`），挂载全部事件处理器；
+     3. 通过 `get_roster(on_roster=self._apply_roster_snapshot)` **按 wire-order 静默同步初始花名册**（保留 PR #16 乱序保护，不打印大表格）；
+     4. 进入 `_raw_tty_mode()`，初始化 `DECSTBM` 滚动区、绘制顶部固定通栏与底部 3 行输入 Dock，并在主滚动区输出紧凑 Banner（标注 `Hub: Embedded` 或 `Hub: Attached`）。
+   - 退出顺序（`/quit`、`/exit`、`:q`、`Ctrl+C` 或空行 `Ctrl+D`）：
+     1. 停止接收输入，还原 `DECSTBM` 滚动区（`\x1b[r`）、复位 SGR（`\x1b[0m`）、将光标移至底部安全位置换行；
+     2. `await self.client.close()` 关闭 Console 客户端连接；
+     3. 若 `owns_hub == True`：执行 `await hub.stop()`。
+   - **`ACPHub.stop()` 防卡死加固**：
+     - 现有 `acp/hub.py` 中 `self.server.close(); await self.server.wait_closed()` 在有外部 Agent（如 `acp launch codex`）仍保持长连接时可能阻塞等待至 `close_timeout`（最长 10s）。
+     - 改造 `ACPHub.stop()`：先调用 `self.server.close()` 停止接收新连接，再并发关闭 `list(self.all_sockets)`（短超时如 `1.0s`），然后 `await asyncio.wait_for(self.server.wait_closed(), timeout=1.5)`，最后执行 `self.storage.clear_roster()`（注：`Storage` 为每次操作按需建立 SQLite 短连接，无需 `storage.close()`）。确保存在外部活跃连接时终端退出仍能在 1~2 秒内完成。
+   - **客户端模式断连感知**：
+     - 主循环每次 tick 检查 `self.client.connected`；若外部 Hub 意外断开（`owns_hub == False` 且 `not self.client.connected`），顶部固定通栏左侧自动切换为 `⚠ Hub disconnected`，并在主消息区提示一次连接已断开，避免用户对死会话盲打。
 
 ---
 
 ## 3. 终端界面布局与渲染引擎 (`acp/console.py`)
 
-### 3.1 三区布局架构
+### 3.1 顶部固定通栏 + `DECSTBM` 滚动区三段式架构
 
-整体终端界面模拟 Claude Code 风格，分为 **主消息滚动区**、**右上角固定在线花名册悬浮卡片** 与 **底部 3 行输入 Dock**：
+采用 **顶部固定 2 行通栏** + **中间 `DECSTBM` 独立滚动消息区** + **底部固定 3 行输入 Dock**，彻底杜绝残影与宽度挤压，消息卡片享受 100% 终端全宽：
 
 ```text
-┌────────────────────────────────────────────────────────┬───────────────────────────┐
-│  [主消息滚动区：自适应安全列宽]                        │ ╭─ Room Roster (3) ──────╮│
-│                                                        │ │ 🟢 @claudecode   IDLE  ││
-│   ▐▛█▜▌   @claudecode · ⚡ EXPLICIT ➔ @codex  12:04:10 │ │ 🟡 @codex        BUSY  ││
-│  ▝▜███▛▘  请检查 storage.py 的游标推进逻辑并补充       │ │ 🔵 @antigravity  START ││
-│   ▘▘ ▝▝   相应的边界单元测试。                         │ ╰────────────────────────╯│
-│                                                        └───────────────────────────┘
-│   ╭───╮   @codex · 📢 #general                12:04:28                              
-│   │◈ ◈│   已完成初步排查，正在修复空主题读取分支。                                  
-│   ╰▀─▀╯                                                                             
-│                                                                                     
-│   ╭▄█▄╮   @user · 📢 #general                 12:05:02                              
-│   │▀ ▀│   收到，完成后请在这里同步结果。                                            
-│   ╰───╯                                                                             
-│                                                                                     
-├─────────────────────────────────────────────────────────────────────────────────────┤
-│ ─ Draft Input (Enter send · Esc clear · /help manual) ───────────────────────────── │
-│ @user ❯ /send @codex 修复完成后通知 @antigravity_                                   │
-│ Commands: /send @agent <msg> | /post [#topic] <msg> | /broadcast | /read | /help    │
-└─────────────────────────────────────────────────────────────────────────────────────┘
+Row 1  │ ⚡ ACP :8765 (host)               Online (3): ● @claudecode IDLE · ● @codex BUSY · ◌ @agy START │
+Row 2  │─────────────────────────────────────────────────────────────────────────────────────────────────│
+       ┌──────────────────────────────────── DECSTBM 滚动区 (Row 3 .. H-3) ──────────────────────────────┐
+Row 3  │  ╭─ ACP Chatroom · Embedded Hub ws://127.0.0.1:8765 · /help for manual ─╮                       │
+       │                                                                                                 │
+       │   ▐▛█▜▌   @claudecode · ⚡ EXPLICIT ➔ @codex                                          12:04:10  │
+       │  ▝▜███▛▘  请检查 storage.py 的游标推进逻辑并补充相应的边界单元测试。                            │
+       │   ▘▘ ▝▝                                                                                         │
+       │                                                                                                 │
+       │   ╭───╮   @codex · 📢 #general                                                        12:04:28  │
+       │   │◈ ◈│   已完成初步排查，正在修复空主题读取分支。                                              │
+       │   ╰▀─▀╯                                                                                         │
+       │                                                                                                 │
+       │   ╭▄█▄╮   @user · ⚡ EXPLICIT ➔ @codex                                                12:05:02  │
+       │   │▀ ▀│   收到，完成后请在这里同步结果。                                                        │
+       │   ╰───╯                                                                                         │
+       └─────────────────────────────────────────────────────────────────────────────────────────────────┘
+Row H-2│ ─ Draft Input (Enter send · Esc clear · /help manual) ───────────────────────────────────────── │
+Row H-1│ @user::> /send @codex 修复完成后通知 @antigravity_                                              │
+Row H  │ Commands: /send | /post | /broadcast | /read | /roster | /remove | /prune | /help | /quit       │
 ```
 
-### 3.2 底部精简 3 行输入 Dock
+### 3.2 顶部固定通栏设计 (`render_header_lines`)
 
-原有 `render_dock_lines` 返回 4 行（包含 `Online Agents (N): ...` 行）。因为在线情况已正式移至右上角固定面板，底部 Dock 精简为 3 行（`cursor_row = 1`）：
-1. **第 0 行（分隔标题栏）**：`─ Draft Input (Enter send · Esc clear · /help manual) ────...`
-2. **第 1 行（草稿输入行）**：`{self.handle} ❯ {visible_draft}`（或保留紧凑前缀并支持水平窗口滚动与宽字符 CJK 裁剪，确保所有行宽度严格 `<= width - 1`）。
-3. **第 2 行（快捷命令提示栏）**：根据终端宽度自适应展示完整版或紧凑版命令提示。
+固定占据终端最顶部 **2 行**（`HEADER_LINES = 2`），高度恒定不变，避免 `DECSTBM` 顶边界抖动：
+- **Row 1（左：Hub 状态；右：聊天室在线情况）**：
+  - 左侧内容：
+    - 内嵌模式：`⚡ ACP :{port} (host)`
+    - 附着模式：`🔗 ACP :{port} (client)`
+    - 断连状态：`⚠ ACP :{port} (disconnected)`
+  - 右侧内容（**右对齐挂在右上角**）：
+    - 统计规则：**不含当前控制台自身 `self.handle`**（与现有 `format_online_agents_bar()` 语义保持一致，避免空房间也显示 `1`），排除 `offline` 状态，按句柄名排序展示。
+    - 状态指示点统一使用**单列宽着色符号**（`cell_len == 1`，避免 Windows Terminal / conhost 下 2 格 Emoji 导致宽度偏移与右端溢出）：
+      - `idle` ➔ 绿色 `●` + `IDLE`
+      - `busy` ➔ 黄色 `●` + `BUSY`
+      - `starting` ➔ 青色 `◌` + `START`
+      - `blocked` ➔ 红色 `●` + `BLK`
+    - 展示格式：`Online ({N}): ● @claude IDLE · ● @codex BUSY`；当 `N == 0` 时显示 `Online (0): ○ waiting for agents`。
+    - 溢出裁剪：在剩余可用列宽 `right_budget = max_cells - left_cells - 2` 内依次拼接成员；若全部放不下，自动截断并在末尾追加 `· +{K}`（如 `Online (5): ● @claude IDLE · ● @codex BUSY · +3`）。若终端极窄（如 `< 50` 列），优先保留 `Online ({N})` 与尽可能多的活跃成员，严格保证整行 `cell_len <= cols - 1`（绝不写满第 `cols` 列触发终端自动换行）。
+- **Row 2（分割线）**：全宽细线 `"─" * (cols - 1)`，弱化色（`dim`）。
+- **向后兼容方法**：保留 `HumanConsole.format_online_agents_bar(max_cells=None)` 公共方法（兼容 [tests/test_console_integration.py](file:///e:/Eproject/chatroom/tests/test_console_integration.py#L93) 等已有调用方），其数据源与顶部通栏共享同一份受 `_ui_lock` 保护的 `self.roster_state`。
 
-### 3.3 右上角悬浮卡片设计与尺寸预算 (`render_roster_overlay`)
+### 3.3 底部固定 3 行输入 Dock (`render_dock_lines`)
 
-1. **卡片内容**：
-   - 标题栏：`╭─ Room Online (N) ──...╮`（`N` 为当前除自身外或全房间活跃非离线成员数，具体见规则：展示除自身 `@user` 外的所有在线 Agent；若有其他 console 也可展示或统一按 `roster_state` 中的在线条目）。
-   - 成员行：每个在线成员占 1 行：`│ {dot} {handle:<W} {STATE} │`
-     - `idle` ➔ `🟢` + 绿色 `IDLE`
-     - `busy` ➔ `🟡` + 黄色 `BUSY`
-     - `starting` ➔ `🔵` + 青色 `STARTING`
-     - `blocked` ➔ `🔴` + 红色 `BLOCKED`
-   - 空状态：无其他在线成员时显示 `│ (no agents online) │`。
-   - 高度限制：当在线成员过多时，最多显示 `max_rows` 行（例如 `min(len(online), max(3, terminal_height // 3))`），超出部分末行显示 `│ ... +K more │`，避免遮挡底部输入框。
-   - 宽度预算：`overlay_width` 动态适应内容与终端宽度，典型为 `26 ~ 34` 列（不超过终端总宽度的 `40%`），当终端过窄（如 `width < 56`）时自动切换为精简模式或暂停右上角悬浮以避免挤压主内容。
-2. **主消息区安全右侧留白 (Safe Right Margin)**：
-   - 为避免较长的消息文本直接横穿打印到右上角卡片下方造成文字覆盖，消息文本折行宽度 `content_width` 在终端顶部可视安全区内考虑右上角面板占位（或统一将消息渲染宽度设为 `max(24, term_width - overlay_width - 2)`，当终端足够宽时既美观阅读又完全不与右上角卡片重叠）。
+原底部 4 行中的 `Online Agents` 行已迁移至顶部通栏右上角，底部 Dock 精简为 **3 行**（`DOCK_LINES = 3`，固定位于 `Row H-2 .. Row H`，输入光标位于 `cursor_row = 1`）：
+1. **Row `H-2`（分隔栏）**：`─ Draft Input (Enter send · Esc clear · /help manual) ───...`（保留 `"Draft Input"` 文本以兼容现有集成测试）。
+2. **Row `H-1`（草稿输入行）**：提示符统一采用 **`{self.handle}::> `**（如 `@user::> `），沿用 `_window_around_cursor` 实现左右水平滚动与宽字符 CJK/Emoji 裁剪，确保 `cell_len(line) <= cols - 1` 且 `cursor_col <= cols - 1`。保留 PR #16 的 Windows `utf-16-le` 增量解码以完整支持 Emoji 输入。
+3. **Row `H`（快捷指令栏）**：按终端宽度自适应显示完整版或紧凑版命令列表，包含 PR #17 的 `/remove` 和 `/prune`：
+   - 宽屏：`Commands: /send @agent <msg> | /post [#topic] <msg> | /broadcast <msg> | /read | /roster | /remove | /prune | /help | /quit`
+   - 中屏：`Cmds: /send | /post | /broadcast | /read | /roster | /remove | /prune | /help | /quit`
+   - 窄屏：按 `cols - 1` 安全裁剪。
 
-### 3.4 零残影擦除与重绘机制 (Zero-Artifact Scrollback Protocol)
+### 3.4 `DECSTBM` 渲染协议、零刷屏与窗口缩放处理
 
-在滚动终端中绘制右上角固定坐标面板时，如果不先擦除旧面板直接滚屏，旧边框就会留在滚动历史中变成“残影”。本设计通过以下严格协议彻底杜绝残影，且全过程受 `self._ui_lock` (`threading.RLock`) 保护：
+所有终端写入操作均受 `self._ui_lock`（`threading.RLock`）保护：
 
-1. **ANSI 定位原语**：
-   - 使用 DEC 光标保存/恢复序列 `\x1b7` 与 `\x1b8`（Windows ConPTY/Windows Terminal 与 POSIX 终端均广泛支持）。
-   - 光标定位序列：`\x1b[{row};{col}H`（1-based 行列坐标）。
-   - 记录当前屏幕已绘制的悬浮框矩形区域：`_overlay_rect = (start_row, start_col, height, width)`。
-2. **擦除旧悬浮框 (`_clear_roster_overlay`)**：
-   - 若 `_overlay_rect` 存在，输出：
-     `\x1b7` + 对 `r` in `range(start_row, start_row + height)` 输出 `\x1b[{r};{start_col}H` + `" " * width` + `\x1b8`。
-   - 重置 `_overlay_rect = None`。
-3. **绘制新悬浮框 (`_draw_roster_overlay`)**：
-   - 计算当前终端尺寸 `(cols, rows)` 及卡片文本行 `overlay_lines`。
-   - 起始列 `start_col = max(1, cols - box_width + 1)`，起始行 `start_row = 1`。
-   - 输出：`\x1b7` + 逐行 `\x1b[{start_row + i};{start_col}H{styled_line}` + `\x1b8`。
-   - 保存 `_overlay_rect = (start_row, start_col, len(overlay_lines), box_width)`。
-4. **核心 `_emit(fn)` 时序**：
-   当主区域有任何内容输出（新消息、`/roster`、`/read`、`/help`、用户输入回显）时：
-   ```text
-   1. _clear_dock()             # 擦除底部 3 行输入框
-   2. _clear_roster_overlay()   # 擦除当前屏幕右上角旧花名册卡片（防止随滚屏上移留下残影！）
-   3. fn()                      # 在主滚动区打印带头像消息或命令结果（此时屏幕可能发生自然滚屏）
-   4. _draw_roster_overlay()    # 在滚屏后的新屏幕第 1 行右上角重新钉住花名册卡片
-   5. _draw_dock()              # 重绘底部 3 行输入框并还原输入光标到草稿编辑位置
-   ```
-5. **`on_presence_change` 静默原地刷新**：
-   - 收到 `EventType.PRESENCE_CHANGE` 事件时：
-     1. 持有 `_ui_lock`，更新 `self.roster_state`（若为 `offline` 则移除或标记移除，其他状态更新为小写状态字符串）。
-     2. **绝不调用** `_out_console.print("• Presence: ...")` 向主消息区打印任何行！
-     3. 若 `_dock_active` 为真，仅执行 `_clear_roster_overlay()` ➔ `_draw_roster_overlay()` 原地刷新右上角悬浮窗，光标在 `\x1b7` / `\x1b8` 保护下纹丝不动，用户正在敲击的草稿零闪烁、零中断。
-   - **非 TTY 环境降级**：当 `self._dock_active` 为 `False`（如测试缓冲或管道重定向）时，不输出任何 `\x1b7`/`\x1b8`/`\x1b[J` 等 ANSI 定位序列，仅更新 `self.roster_state`，且同样不再打印 `Presence:` 刷屏文本（用户仍可随时通过 `/roster` 查看完整花名册表）。
+1. **TUI 初始化与退出（仅在 `_raw_tty_mode()` 返回 `True` 且 `rows >= 8` 时启用）**：
+   - 初始化：清屏归位 `\x1b[2J\x1b[H` ➔ 设置滚动区 `\x1b[3;{rows - 3}r` ➔ 记录 `_viewport = (cols, rows)`、`_feed_row = 3`、`_feed_at_bottom = False` ➔ 绘制顶部通栏（Rows 1~2）➔ 绘制底部 Dock（Rows `H-2..H`）➔ 将光标移至输入行 `(rows - 1, cursor_col + 1)`。
+   - 退出清理（`finally`）：无论正常 `/quit` 还是异常/信号中断，**必须输出** `\x1b[r\x1b[0m\x1b[{rows};1H\n`，恢复终端全屏滚动区，绝不遗留锁死状态。
+   - **极矮终端降级（`rows < 8`）**：不启用 `DECSTBM`，退化为相对位置 3 行底部 Dock 模式；非 TTY 环境（`dock_active=False`）不输出任何 ANSI 控制序列（无 `\x1b[...r`、`\x1b7`、`\x1b8`、`\x1b[J`）。
+2. **统一输出通道 `_emit(fn)`**：
+   - **所有**向主滚动区输出的内容——包括带头像消息、紧凑 Banner、`/help`、`/roster` 表格、`/read` 历史、`/remove`、`/prune`、错误提示以及非聊天指令回显——**全部统一走 `_emit()`**（修复 `handle_key` 原先绕过 `_emit()` 的问题）。
+   - 在 `DECSTBM` 激活时，`_emit(fn)` 执行步骤：
+     1. 检测终端尺寸是否变化；若变化先执行 `_handle_resize()`；
+     2. 使用临时内存 `Console`（`width = cols`, `color_system` 继承自 `_out_console`）将 `fn()` 渲染为带 ANSI 样式的行列表 `lines`；
+     3. 若 `_feed_at_bottom` 为 `True`，将光标移至 `\x1b[{bottom};1H`，逐行输出 `\n{line}\x1b[0m`（利用 `DECSTBM` 仅滚动 `3..bottom`，顶部通栏与底部 Dock 纹丝不动）；
+     4. 若 `_feed_at_bottom` 为 `False`，将光标移至 `\x1b[{_feed_row};1H`，逐行输出并在跨过 `bottom` 时自动切入滚动状态，更新 `_feed_row` / `_feed_at_bottom`；
+     5. 重绘顶部通栏（如状态有变更）并将光标归位到输入行 `\x1b[{rows - 1};{cursor_col + 1}H`。
+3. **`on_presence_change` 静默原地刷新（零刷屏）**：
+   - 更新 `self.roster_state`（收到 `offline` 时移除该句柄，不区分大小写；其他状态更新为小写值）。
+   - **绝不向主消息区打印任何 `• Presence: ... is now ...` 文本**（无论是 TTY 还是非 TTY 模式均不再刷屏）。
+   - 若 `_dock_active` 为真，仅发送单次原子序列刷新 Row 1：
+     `\x1b7\x1b[1;1H\x1b[2K{styled_header_row_1}\x1b[0m\x1b8`
+     输入光标全程不闪烁、草稿零中断。
+   - `/remove` 和 `/prune` 修改 `self.roster_state` 后同样立即刷新顶部通栏 Row 1。
+4. **窗口缩放 (`_handle_resize`)**：
+   - POSIX 下监听 `SIGWINCH` 设置 `_resize_pending = True`；Windows 及跨平台均在主循环 0.3s tick、`_emit()` 及按键重绘前对比 `shutil.get_terminal_size()`。
+   - 尺寸变化时重新设置 `\x1b[3;{new_bottom}r`（或降级）、清绘顶部通栏与底部 3 行 Dock、钳制 `_feed_row = min(_feed_row, new_bottom)` 并归位输入光标。
+5. **人类自身发言的头像展示与去重策略**：
+   - 在 `handle_key` 按回车提交时：
+     - 若为聊天指令（`/send`、`/post`、`/broadcast`），**不打印**原始灰色 `@user::> /send ...` 回显行，保持对话流干净；
+     - 其他控制命令（如 `/roster`、`/read`、`/help`、`/remove`、`/prune`）仍可精简回显或直接展示执行结果（统一经由 `_emit()`）。
+   - 渲染去重规则（严格对齐 [acp/hub.py](file:///e:/Eproject/chatroom/acp/hub.py#L296-L339) 的路由事实）：
+     - `/send @target <msg>`：Hub 转发显式消息时排除了发送者自身 socket（`ws != websocket`），因此 Console 在 `client.send_message(...)` 返回 `status == "ok"` 后，**本地调用头像卡片渲染 `@user` 的显式消息**（当 `delivered is False` 时附加 `[dim](offline · queued)[/dim]` 提示）。
+     - `/broadcast <msg>`（普通广播，不含 `--urgent`）：Hub 排除了发送者自身，因此 Console 在返回 `status == "ok"` 后，**本地渲染 `@user` 的广播头像卡片**。
+     - `/post [#topic] <msg>` 与 `/broadcast --urgent <msg>`：Hub 会将事件广播回发送者自己，Console 仅在 `on_silent_message` / `on_broadcast` 事件中渲染一次，**绝不重复渲染**。
 
 ---
 
@@ -184,47 +214,48 @@
 ```python
 @dataclass(frozen=True)
 class AvatarSpec:
-    key: str                         # 形象类别标识，如 "claude", "codex", "agy", "dsh", "user", "custom"
-    lines: tuple[str, str, str]      # 固定 3 行，每行 display cell width 严格为 7
-    color: str                       # Rich 主题主色，如 "#E07A5F", "bright_green"
+    key: str                         # 形象类别标识："claude", "codex", "agy", "dsh", "user", "custom"
+    lines: tuple[str, str, str]      # 固定 3 行，每行 rich.cells.cell_len 严格等于 7
+    color: str                       # Rich 主题主色
     badge: str                       # 角色简短标签，如 "CLAUDE", "CODEX", "AGY", "DSH", "HUMAN"
 ```
 
-内置 5 类核心角色形象（全部经过终端等宽校验，每行 `rich.cells.cell_len == 7`）：
+内置 5 类核心角色形象（全部使用 `cell_len == 1` 的 Unicode 半块/制表字符，每行宽度严格为 **7 cells**）：
 
-| 成员类别 | 匹配句柄规则（不区分大小写） | 3 行像素小人预览 (7 cells × 3 lines) | 主色调 (`color`) |
+| 成员类别 | 匹配正则规则（归一化 `norm = handle.strip().lstrip("@").lower()`） | 3 行像素小人 (7×3) | 主色调 (`color`) |
 | :--- | :--- | :--- | :--- |
-| **Claude Code** | `@claude*`（含 `@claudecode`） | ` ▐▛█▜▌ `<br>`▝▜███▛▘`<br>` ▘▘ ▝▝ ` | `#E07A5F` (珊瑚橙) |
-| **Codex / GPT** | `@codex*`, `@gpt*` | ` ╭───╮ `<br>` │◈ ◈│ `<br>` ╰▀─▀╯ ` | `#4ADE80` (翠绿) |
-| **Antigravity** | `@agy*`, `@antigravity*` | ` ▄▀█▀▄ `<br>` ▐▛▄▜▌ `<br>`  ▀ ▀  ` | `#A78BFA` (星云紫) |
-| **DeepSeek** | `@dsh*`, `@deepseek*` | ` ▄███▄ `<br>`▐█● ●█▌`<br>` ▀▄▄▄▀ ` | `#38BDF8` (深海蓝) |
-| **Human / User** | `@user`, `@human`, `@console`, `@observer` | ` ╭▄█▄╮ `<br>` │▀ ▀│ `<br>` ╰───╯ ` | `#FBBF24` (琥珀金) |
-| **Custom / 其他** | 任意其他自定义 `@handle` | 由句柄 SHA-256/BLAKE2 确定性映射到内置自定义模板池 | 确定性调色板 (青/粉/金/蓝绿等) |
+| **Claude Code** | `^(claudecode\|claude)(?:$\|[\d_-])` | ` ▐▛█▜▌ `<br>`▝▜███▛▘`<br>` ▘▘ ▝▝ ` | `#E07A5F` (珊瑚橙) |
+| **Codex / GPT** | `^(codex\|gpt)(?:$\|[\d_-])` | ` ╭───╮ `<br>` │◈ ◈│ `<br>` ╰▀─▀╯ ` | `#4ADE80` (翠绿) |
+| **Antigravity** | `^(antigravity\|agy)(?:$\|[\d_-])` | ` ▄▀█▀▄ `<br>` ▐▛▄▜▌ `<br>`  ▀ ▀  ` | `#A78BFA` (星云紫) |
+| **DeepSeek** | `^(deepseek\|dsh)(?:$\|[\d_-])` | ` ▄███▄ `<br>`▐█● ●█▌`<br>` ▀▄▄▄▀ ` | `#38BDF8` (深海蓝) |
+| **Human / User** | `^(user\|human\|console\|observer)(?:$\|[\d_-])` | ` ╭▄█▄╮ `<br>` │▀ ▀│ `<br>` ╰───╯ ` | `#FBBF24` (琥珀金) |
+| **Custom / 其他** | 其余任意 `@handle` | 由 `hashlib.blake2b(norm.encode())` 确定性映射到 4 套 7×3 像素模板 | 确定性 6 色调色板 |
 
-匹配优先级与多实例处理：
-- 归一化句柄 `norm = handle.strip().lstrip("@").lower()`。
-- 去掉尾部数字编号或连字符后缀进行前缀匹配（例如 `@codex1`、`@codex-2`、`@claude_reviewer` 均可命中对应家族头像），确保 `acp launch codex` 自动分配的 `@codex1`、`@codex2` 依然拥有 Codex 家族专属头像，同时保持各角色颜色或头部标记清晰可辨。
+边界规则：
+- 严格要求前缀后紧跟字符串结尾、数字、`_` 或 `-`（例如 `@codex1`、`@claude-rev` 命中家族头像；`@ag` 不会误匹配 `@agy`，`@alice` 走确定性自定义头像）。
+- 同家族多实例（如 `@codex1`、`@codex2`）保持一致的家族像素脸型以便一眼识别模型阵营，同时在消息 Header 中清晰展示完整句柄 `@codex1` / `@codex2`。
 
-### 4.2 多行消息并排排版算法 (`render_message_with_avatar`)
+### 4.2 基于显示列宽的并排排版算法 (`render_message_with_avatar`)
 
-在 `acp/avatars.py` 中提供纯文本与 Rich Renderable 两种渲染辅助，核心结构如下：
+**硬性约束**：**严禁使用 Python 标准库 `textwrap.wrap`**（其按 `len()` 字符数换行，会导致中文字段超宽 2 倍）。必须在 `acp/avatars.py` 中实现基于 `rich.cells.cell_len` 的单元格折行器 `wrap_to_cells(text: str, max_cells: int) -> list[str]`：
+- 按 `\n` 拆分自然段（保留空行）；
+- 每段按终端显示宽度逐字/按词切分，确保中英文混排、Emoji、长 URL 均满足每行 `cell_len <= max_cells`；
+- 所有外部文本（`sender`、`target`、`topic`、`content`）写入 Rich Markup 前必须经过 `rich.markup.escape(...)` 转义，防止 `[main]` 等方括号导致 `MarkupError`。
+
+排版结构（左侧固定 7 列头像 + 2 列间隔，共 9 列左栏；右侧 `body_width = max(20, max_width - 10)`）：
 
 ```text
-第 1 行:  {avatar[0]}  {sender} {mode_badge} {target/topic}  {timestamp}
+第 1 行:  {avatar[0]}  {sender} · {mode_badge} {target/topic}  {timestamp}
 第 2 行:  {avatar[1]}  {body_line_1}
-第 3 行:  {avatar[2]}  {body_line_2}        （若正文不足 2 行则右侧留空，保证 3 行头像完整显示）
-第 4+行:  {7空格缩进}  {body_line_3...}     （长文本按可用列宽自动折行，保持左边界对齐）
+第 3 行:  {avatar[2]}  {body_line_2}        （若正文仅 1 行则右侧留空，保证 3 行头像完整显示）
+第 4+行:  {7空格缩进}  {body_line_3...}     （后续折行与正文首行严格左对齐）
 ```
 
-具体渲染规则：
-1. **Rich Markup 注入安全**：所有来自网络的 `sender`、`target`、`topic`、`content` 在嵌入 Rich 格式化串前必须经过 `rich.markup.escape(...)` 转义，防止正文中的 `[main]` 等方括号引发 `MarkupError`。
-2. **折行对齐**：使用 `textwrap.wrap` 或按终端显示单元格宽度 (`cell_len`) 的换行器，确保中英文混排、Emoji 正文均在 `body_width = max(20, max_line_width - 9)` 内折行（7 列头像 + 2 列间隔），后续所有行与正文首行垂直对齐。
-3. **覆盖范围**：
-   - `HumanConsole.on_explicit_message`（标注 `⚡ EXPLICIT ➔ @target`）
-   - `HumanConsole.on_silent_message`（标注 `📢 #topic`）
-   - `HumanConsole.on_broadcast`（标注 `📣 BROADCAST` 或 `🚨 URGENT`）
-   - `HumanConsole._do_read`（`/read [topic]` 回溯历史消息同样带头像渲染，保持视觉统一）。
-   - 消息之间保留 1 行空行呼吸感，形成类似 Claude Code 对话气泡流的阅读体验。
+覆盖全部消息入口：
+- `HumanConsole.on_explicit_message` & 人类本地 `/send` 卡片（`⚡ EXPLICIT ➔ @target`）
+- `HumanConsole.on_silent_message`（`📢 #topic`）
+- `HumanConsole.on_broadcast` & 人类本地 `/broadcast` 卡片（`📣 BROADCAST` / `🚨 URGENT`）
+- `HumanConsole._do_read`（`/read [topic]` 历史消息同样带头像渲染，消息间空 1 行）。
 
 ---
 
@@ -234,16 +265,17 @@ class AvatarSpec:
 
 | 文件 | 变更类型 | 核心职责 |
 | :--- | :--- | :--- |
-| `acp/avatars.py` | **新增** | `AvatarSpec` 定义、5 大角色与哈希自定义头像库、`resolve_avatar()`、`render_message_with_avatar()` 并排折行排版引擎 |
-| `acp/console.py` | **重构增强** | 精简底部 3 行 Dock；新增右上角固定悬浮花名册绘制/擦除逻辑；`on_presence_change` 零刷屏更新；消息流集成头像渲染；新增 `UnifiedConsoleRunner` / `start_unified_console()` 实现同进程 Hub 探测、拉起与协同关闭 |
-| `acp/cli.py` | **修改** | 根命令 `acp` 默认进入统一终端；`acp hub` 增加 `--headless` 与交互模式自适应；`acp console` 默认调用 `start_unified_console()` |
-| `acp/hub.py` | **微调** | 支持在嵌入模式下静默日志配置（避免与 `run_hub()` 强制 `basicConfig` 冲突），提供可被控制台安全复用的端口/生命周期辅助 |
-| `tests/test_avatars.py` | **新增** | 头像匹配、宽字符单元格宽度不变量、多行消息对齐单元测试 |
-| `tests/test_console.py` | **更新扩展** | 更新对零刷屏 `on_presence_change`、右上角悬浮卡片防残影、3 行 Dock 与头像消息流的断言 |
-| `tests/test_unified_cli.py` | **新增** | 同进程内嵌 Hub 生命周期、端口已占用复用外部 Hub 降级、CLI 路由（`acp` / `acp hub` / `acp hub --headless` / `acp console`）测试 |
+| `acp/avatars.py` | **新增** | `AvatarSpec`、5 类内置像素头像与确定性哈希自定义头像、正则匹配、`wrap_to_cells()` 宽字符折行器、`render_message_with_avatar()` |
+| `acp/console.py` | **重构增强** | 顶部固定 2 行通栏（右上角在线状态）+ `DECSTBM` 滚动区 + 底部 3 行 Dock（提示符 `@user::> `）；`on_presence_change` 零刷屏更新；统一 `_emit()`；窗口 Resize 与断连检测；人类自发消息头像渲染去重；`sync_roster(display_table=False)` 保留 PR #16 wire-order；保留 `/remove`、`/prune` 与 `format_online_agents_bar()` 兼容；新增 `probe_hub()`、`UnifiedConsoleRunner`、`start_unified_console()` |
+| `acp/cli.py` | **修改** | 根命令组 `invoke_without_command=True` 与 `ctx.obj` 参数透传；`acp hub` 增加 `--headless`/`--as` 并免疫 `ACP_HUB_URI` 劫持；`acp console` 增加 `--db`/`--no-auto-hub` 接入 `start_unified_console()` |
+| `acp/hub.py` | **增强** | 新增 `bound_port` 属性（支持 `port=0`）；加固 `ACPHub.stop()` 主动并发关闭活跃 socket 防止退出卡顿 |
+| `tests/test_avatars.py` | **新增** | 头像匹配边界、7-cell 不变量、CJK/方括号 `wrap_to_cells` 与多行排版单测 |
+| `tests/test_console.py` | **更新扩展** | 顶部固定通栏、零 `Presence:` 刷屏、`DECSTBM` 退出复位、Resize/窄屏降级、`@user::> ` 3 行 Dock、人类发言头像去重、`/remove` & `/prune` 联动 |
+| `tests/test_console_integration.py` | **更新扩展** | 验证现有 Windows Emoji 与 wire-order 测试兼容，新增真实 PTY 统一启动（自动拉起内嵌 Hub ➔ Agent 通信 ➔ `/quit` 释放端口）DT 测试 |
+| `tests/test_unified_cli.py` | **新增** | 三态端口探测、CLI 路由单测（`not dt`）+ 同进程内嵌 Hub 生命周期、外部活跃连接秒退、日志静默隔离（`dt`） |
 
 ### 5.2 向后兼容性承诺
 
-1. **Headless & CI 兼容**：`acp hub --headless` 以及所有非 TTY 环境下调用 `acp hub` 的行为与改造前完全一致，不影响现有后台部署脚本或自动化测试。
-2. **外部客户端协议 100% 兼容**：WebSocket 协议帧格式（`acp/protocol.py`）、`acp launch`、`acp resume`、`acp-chat send`、`acp-chat read`、`acp-chat roster`、`acp-chat broadcast`、`acp task` 均无需修改协议即可无缝接入合并后的统一终端。
-3. **非 TTY 控制台兼容**：当标准输入/输出不是 TTY 时，`HumanConsole` 自动关闭 ANSI 定位与 Dock 控制序列，仅按清晰格式输出消息卡片与命令响应。
+1. **Headless & CI 兼容**：`acp hub --headless` 与所有非 TTY 下的 `acp hub` 行为与之前完全一致；非 TTY 下裸运行 `acp` 打印帮助安全退出。
+2. **协议与外部命令 100% 兼容**：`acp/protocol.py`、`acp launch`、`acp resume`、`acp-chat send/read/roster/broadcast/task/model/remove/kick/leave/prune` 无需任何协议破坏即可接入。
+3. **现有集成测试兼容**：保留 `format_online_agents_bar()` 方法、底部 `"Draft Input"` 标识、PR #16 的 Windows UTF-16-LE Emoji 输入与 `get_roster(on_roster=...)` wire-order 机制，以及 PR #17 的 `/remove`、`/kick`、`/prune` 完整能力。
