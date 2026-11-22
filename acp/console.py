@@ -228,7 +228,13 @@ def _connection_refused(exc: BaseException) -> bool:
 
 
 def local_port_available(host: str, port: int) -> bool:
-    """True when nothing is listening on host:port. A dropped SYN still counts as free."""
+    """True when this process can bind host:port.
+
+    A successful bind is not proof that the client URI is free. On Windows,
+    0.0.0.0:P and 127.0.0.1:P can both bind, and either listener still accepts
+    the other address. Callers probe the client URI first and trust this only
+    when that probe did not receive a pong.
+    """
     if port == 0:
         return True
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
@@ -1231,9 +1237,6 @@ class UnifiedConsoleRunner:
         bind_host = self.bind_host or host
         bind_port = self.bind_port if self.bind_port is not None else port
         local = _is_local_host(host) and _is_local_host(bind_host)
-        if self.auto_hub and local and (bind_port == 0 or port == 0 or local_port_available(bind_host, bind_port)):
-            await self._embed(bind_host, 0 if bind_port == 0 or port == 0 else bind_port)
-            return
         if not self.auto_hub or not local:
             status = await probe_hub(self.uri)
             if status is not ProbeStatus.ALIVE_HUB:
@@ -1245,6 +1248,13 @@ class UnifiedConsoleRunner:
             self.client_uri = self.uri
             self.bound_port = port
             return
+        # An ephemeral port cannot already be a hub.
+        if bind_port == 0 or port == 0:
+            await self._embed(bind_host, 0)
+            return
+        # Probe the client URI before trusting a bind. A hub on 0.0.0.0 still
+        # answers 127.0.0.1, and a hub on 127.0.0.1 still answers that URI when
+        # binding 0.0.0.0 would also succeed.
         status = await probe_hub(self.uri)
         if status is ProbeStatus.ALIVE_HUB:
             self.owns_hub = False
@@ -1253,12 +1263,15 @@ class UnifiedConsoleRunner:
             if self.explicit_hub_options:
                 self.attached_notice = True
             return
-        if status is ProbeStatus.PORT_OCCUPIED_NON_ACP:
-            raise HubConnectionError(
-                f"Port {self.uri} is occupied by a non-ACP service. Refusing to attach.",
-                reason=status.value,
-            )
-        await self._embed(bind_host, bind_port)
+        # No pong. A closed Windows port drops the SYN, so the probe times out
+        # and looks occupied. Bind-success means free only in that case.
+        if status is ProbeStatus.PORT_FREE or local_port_available(bind_host, bind_port):
+            await self._embed(bind_host, bind_port)
+            return
+        raise HubConnectionError(
+            f"Port {self.uri} is occupied by a non-ACP service. Refusing to attach.",
+            reason=status.value,
+        )
 
     async def start(self) -> None:
         await self._ensure_hub()

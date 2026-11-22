@@ -191,6 +191,62 @@ async def test_embedded_hub_lifecycle_and_fast_shutdown_with_active_client(tmp_p
 
 
 @pytest.mark.dt
+async def test_attaches_across_wildcard_and_loopback_binds(tmp_path):
+    """A hub on one local address must be attached, not duplicated, from the other.
+
+    On Windows, binding 127.0.0.1:P still succeeds while 0.0.0.0:P is listening,
+    and binding 0.0.0.0:P still succeeds while 127.0.0.1:P is listening. The
+    client URI answers either way, so the console has to probe before it embeds.
+    """
+    wild = ACPHub(host="0.0.0.0", port=0, db_path=str(tmp_path / "wild.db"))
+    await wild.start()
+    wild_uri = f"ws://127.0.0.1:{wild.bound_port}"
+    wild_runner = UnifiedConsoleRunner(
+        uri=wild_uri,
+        db_path=str(tmp_path / "wild-console.db"),
+        ui_console=_ui()[1],
+        auto_hub=True,
+        bind_host="127.0.0.1",
+        bind_port=wild.bound_port,
+    )
+    loop = ACPHub(host="127.0.0.1", port=0, db_path=str(tmp_path / "loop.db"))
+    loop_uri = ""
+    loop_runner = None
+    try:
+        await wild_runner.start()
+        assert wild_runner.owns_hub is False
+        assert wild_runner.hub is None
+        await _wait_until(lambda: "@user" in wild.clients)
+        await wild_runner.shutdown()
+        assert await probe_hub(wild_uri, timeout=1) is ProbeStatus.ALIVE_HUB
+
+        await loop.start()
+        loop_uri = client_connect_uri("0.0.0.0", loop.bound_port)
+        loop_runner = UnifiedConsoleRunner(
+            uri=loop_uri,
+            db_path=str(tmp_path / "loop-console.db"),
+            ui_console=_ui()[1],
+            auto_hub=True,
+            bind_host="0.0.0.0",
+            bind_port=loop.bound_port,
+            explicit_hub_options=True,
+        )
+        await loop_runner.start()
+        assert loop_runner.owns_hub is False
+        assert loop_runner.hub is None
+        assert loop_runner.attached_notice is True
+        await _wait_until(lambda: "@user" in loop.clients)
+        await loop_runner.shutdown()
+        assert await probe_hub(loop_uri, timeout=1) is ProbeStatus.ALIVE_HUB
+    finally:
+        await wild_runner.shutdown()
+        await wild.stop()
+        if loop_runner is not None:
+            await loop_runner.shutdown()
+        await loop.stop()
+
+
+@pytest.mark.dt
 async def test_attaches_to_existing_hub_without_stopping_it(tmp_path):
     hub = ACPHub(port=0, db_path=str(tmp_path / "external.db"))
     await hub.start()
