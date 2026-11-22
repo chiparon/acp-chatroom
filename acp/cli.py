@@ -11,7 +11,7 @@ from rich.table import Table
 
 from .hub import run_hub
 from .launcher import launch_agent
-from .console import start_console
+from .console import client_connect_uri, start_unified_console
 from .client import ACPClient, sync_send, sync_read, sync_roster
 from .protocol import ActionType, MessageMode
 from .agents import agent_registry
@@ -21,10 +21,35 @@ from .storage import Storage
 rich_console = Console()
 
 
-@click.group()
-def cli():
+def _parent(ctx):
+    return ctx.obj or {}
+
+
+def _fallback(value, parent_value, default):
+    if value is not None:
+        return value
+    if parent_value is not None:
+        return parent_value
+    return default
+
+
+@click.group(invoke_without_command=True)
+@click.option("--uri", envvar="ACP_HUB_URI", default=None, help="ACP Hub URI")
+@click.option("--as", "--handle", "-a", "handle", default=None, help="Default handle for subcommands")
+@click.option("--db", default="acp_chatroom.db", help="SQLite database path")
+@click.pass_context
+def cli(ctx, uri, handle, db):
     """ACP (Agent Communication Protocol) - Multi-Agent Chatroom Toolkit"""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["uri"] = uri
+    ctx.obj["handle"] = handle
+    ctx.obj["db"] = db
+    if ctx.invoked_subcommand is not None:
+        return
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        start_unified_console(uri=uri, handle=handle or "@user", db_path=db, auto_hub=True)
+        return
+    click.echo(ctx.get_help())
 
 
 # -------------------------------------------------------------
@@ -33,10 +58,28 @@ def cli():
 @cli.command("hub")
 @click.option("--host", default="127.0.0.1", help="Host interface to bind to")
 @click.option("--port", default=8765, type=int, help="Port to listen on")
-@click.option("--db", default="acp_chatroom.db", help="SQLite database path")
-def hub_command(host, port, db):
+@click.option("--db", default=None, help="SQLite database path")
+@click.option("--headless", is_flag=True, help="Run the hub without the unified console")
+@click.option("--as", "--handle", "-a", "handle", default=None, help="Console handle when the TUI starts")
+@click.pass_context
+def hub_command(ctx, host, port, db, headless, handle):
     """Start the central ACP Chatroom WebSocket Hub server."""
-    run_hub(host=host, port=port, db_path=db)
+    parent = _parent(ctx)
+    db_path = _fallback(db, parent.get("db"), "acp_chatroom.db")
+    chosen = _fallback(handle, parent.get("handle"), "@user")
+    # Hub addressing comes only from --host/--port. ACP_HUB_URI must not redirect it.
+    if headless or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        run_hub(host=host, port=port, db_path=db_path)
+        return
+    start_unified_console(
+        uri=client_connect_uri(host, port),
+        handle=chosen,
+        bind_host=host,
+        bind_port=port,
+        db_path=db_path,
+        auto_hub=True,
+        explicit_hub_options=(db_path != "acp_chatroom.db" or host != "127.0.0.1"),
+    )
 
 
 # -------------------------------------------------------------
@@ -44,13 +87,16 @@ def hub_command(host, port, db):
 # -------------------------------------------------------------
 @cli.command("launch")
 @click.argument("command")
-@click.option("--as", "--handle", "-a", "handle", help="Agent handle (profiles receive an automatic name if omitted)")
+@click.option("--as", "--handle", "-a", "handle", default=None, help="Agent handle (profiles receive an automatic name if omitted)")
 @click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--idle-timeout", default=1.5, type=float, help="Seconds of output silence to mark as IDLE")
 @click.option("--output-status", is_flag=True, help="Use output activity for CLIs without native session state")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
-def launch_command(command, handle, uri, idle_timeout, non_interactive, output_status):
+@click.pass_context
+def launch_command(ctx, command, handle, uri, idle_timeout, non_interactive, output_status):
     """Launch and wrap an agent process in ConPTY with automatic prompt injection."""
+    if handle is None:
+        handle = _parent(ctx).get("handle")
     try:
         launch_agent(
             command=command,
@@ -71,8 +117,11 @@ def launch_command(command, handle, uri, idle_timeout, non_interactive, output_s
 @click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
 @click.option("--non-interactive", is_flag=True, help="Disable local stdin forwarding")
 @click.option("--output-status", is_flag=True, help="Use output activity for CLIs without native session state")
-def resume_command(agent, session_id, handle, uri, non_interactive, output_status):
+@click.pass_context
+def resume_command(ctx, agent, session_id, handle, uri, non_interactive, output_status):
     """Recall a native session by ID and register it with the Hub."""
+    if handle is None:
+        handle = _parent(ctx).get("handle")
     if agent not in agent_registry():
         raise click.BadParameter(f"Unknown agent {agent!r}. See 'acp agents'.", param_hint="AGENT")
     try:
@@ -86,11 +135,24 @@ def resume_command(agent, session_id, handle, uri, non_interactive, output_statu
 # 3. acp console
 # -------------------------------------------------------------
 @cli.command("console")
-@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
-@click.option("--as", "--handle", "-a", "handle", default="@user", help="Your user handle")
-def console_command(uri, handle):
+@click.option("--uri", default=None, help="ACP Hub URI (falls back to ACP_HUB_URI)")
+@click.option("--as", "--handle", "-a", "handle", default=None, help="Your user handle")
+@click.option("--db", default=None, help="SQLite database path used when embedding a hub")
+@click.option("--no-auto-hub", is_flag=True, help="Do not start a local hub when the port is free")
+@click.pass_context
+def console_command(ctx, uri, handle, db, no_auto_hub):
     """Open the human observer & interaction terminal."""
-    start_console(uri=uri, handle=handle)
+    import os
+    parent = _parent(ctx)
+    chosen_uri = uri if uri is not None else parent.get("uri") or os.environ.get("ACP_HUB_URI") or "ws://127.0.0.1:8765"
+    chosen_handle = _fallback(handle, parent.get("handle"), "@user")
+    chosen_db = _fallback(db, parent.get("db"), "acp_chatroom.db")
+    start_unified_console(
+        uri=chosen_uri,
+        handle=chosen_handle,
+        db_path=chosen_db,
+        auto_hub=not no_auto_hub,
+    )
 
 
 # -------------------------------------------------------------

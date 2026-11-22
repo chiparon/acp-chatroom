@@ -96,6 +96,7 @@ class ACPHub:
                 except websockets.exceptions.ConnectionClosed:
                     break
                 except json.JSONDecodeError:
+                    logger.warning("Invalid JSON frame on hub connection")
                     await self._safe_send(
                         websocket,
                         json.dumps({"event": EventType.ERROR.value, "error": "Invalid JSON format"}),
@@ -449,17 +450,41 @@ class ACPHub:
         else:
             return {"event": EventType.ERROR.value, "error": f"Unknown action: {action}"}
 
+    @property
+    def bound_port(self) -> int:
+        """Port the listening socket actually bound, including when port was 0."""
+        server = self.server
+        sockets = getattr(server, "sockets", None) if server is not None else None
+        if sockets:
+            return int(sockets[0].getsockname()[1])
+        return int(self.port)
+
     async def start(self) -> None:
         self._running = True
         logger.info(f"Starting ACP Hub on ws://{self.host}:{self.port} ...")
         self.server = await serve(self.handle_connection, self.host, self.port)
         logger.info("ACP Hub is ready.")
 
+    async def _close_socket_bounded(self, ws: WebSocketServerProtocol) -> None:
+        try:
+            await asyncio.wait_for(self._safe_close(ws), timeout=0.6)
+        except asyncio.TimeoutError:
+            logger.warning("Timed out closing a hub socket")
+
     async def stop(self) -> None:
+        """Stop accepting and close live sockets so an active agent cannot stall shutdown."""
         self._running = False
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
+        server = self.server
+        sockets = list(self.all_sockets)
+        if server is not None:
+            server.close()
+            if sockets:
+                await asyncio.gather(*(self._close_socket_bounded(ws) for ws in sockets), return_exceptions=True)
+            try:
+                await asyncio.wait_for(server.wait_closed(), timeout=1.0)
+            except asyncio.TimeoutError:
+                logger.warning("ACP Hub wait_closed timed out")
+        self.server = None
         self.storage.clear_roster()
         logger.info("ACP Hub stopped.")
 
