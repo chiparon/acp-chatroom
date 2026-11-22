@@ -5,7 +5,7 @@ import os
 from .agents import AgentProfile, agent_registry
 
 
-CODEX_RULES = """# ACP Multi-Agent Chatroom Rules for Codex
+CODEX_RULES = """# ACP Multi-Agent Chatroom Rules
 
 This workspace is connected to an ACP Chatroom where multiple agent processes collaborate.
 
@@ -21,8 +21,9 @@ Always reply to explicit sender requests via `acp-chat send --to @sender --mode 
 
 def install_skill(profile: AgentProfile, workspace: Path | None = None) -> Path:
     root = Path.home() / profile.user_skills if workspace is None else workspace / profile.workspace_skills
-    if workspace is None and profile.executable == "dsh" and os.environ.get("DSH_HOME"):
-        root = Path(os.environ["DSH_HOME"]).expanduser() / "skills"
+    home_env = {"dsh": "DSH_HOME", "grok": "GROK_HOME"}.get(profile.executable)
+    if workspace is None and home_env and os.environ.get(home_env):
+        root = Path(os.environ[home_env]).expanduser() / "skills"
     target = root / "acp-chatroom" / "SKILL.md"
     content = Path(__file__).with_name("chatroom_skill.md").read_bytes()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -36,7 +37,7 @@ def init_workspace_skills(workspace_root: str = ".") -> None:
     for profile in dict.fromkeys(agent_registry().values()):
         print(install_skill(profile, root))
 
-    # 3. Codex Rules (AGENTS.md)
+    # Workspace instructions shared by the registered agents (AGENTS.md)
     agents_file = root / "AGENTS.md"
     if agents_file.exists():
         existing = agents_file.read_text(encoding="utf-8")

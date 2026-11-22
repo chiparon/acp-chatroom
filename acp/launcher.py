@@ -95,7 +95,7 @@ class AgentLauncher:
             # Recognize the documented legacy command even with explicit launcher defaults.
             defaults = {self.profile.access_flag, "--no-daemon"}
             operation = tuple(arg for arg in args[1:-1] if arg not in defaults)
-            if operation == self.profile.resume_args:
+            if operation == self.profile.resume_args or operation in self.profile.resume_aliases:
                 try:
                     self.session = self.profile.session_key(args[-1])
                 except ValueError:
@@ -115,7 +115,8 @@ class AgentLauncher:
 
         self.needs_claim = self.session is not None or not self.handle
         self.client = ACPClient(uri=self.uri, handle=None if self.needs_claim or self.native_dsh else self.handle)
-        self.client.supports_model_switch = bool(self.profile and self.profile.executable in {"codex", "claude", "agy", "dsh"})
+        self.client.supports_model_switch = bool(
+            self.profile and self.profile.executable in {"codex", "claude", "agy", "dsh", "grok"})
         self.pty_proc: Optional[Any] = None
         self.sub_proc: Optional[subprocess.Popen] = None
         native_apps = {"codex": "codex", "agy": "antigravity"}
