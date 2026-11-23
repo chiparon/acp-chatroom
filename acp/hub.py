@@ -45,7 +45,16 @@ class ACPHub:
         self.model_sockets: Set[WebSocketServerProtocol] = set()
         self._close_after_reply: Set[WebSocketServerProtocol] = set()
         self.server = None
+        self._bound_port: Optional[int] = port if port > 0 else None
         self._running = False
+
+    @property
+    def bound_port(self) -> int:
+        if self.server and getattr(self.server, "sockets", None):
+            return self.server.sockets[0].getsockname()[1]
+        if self._bound_port is not None:
+            return self._bound_port
+        return self.port
 
     async def broadcast_event(self, event_data: Dict[str, Any], exclude: Optional[WebSocketServerProtocol] = None) -> dict[str, bool]:
         payload = json.dumps(event_data)
@@ -453,13 +462,40 @@ class ACPHub:
         self._running = True
         logger.info(f"Starting ACP Hub on ws://{self.host}:{self.port} ...")
         self.server = await serve(self.handle_connection, self.host, self.port)
-        logger.info("ACP Hub is ready.")
+        self._bound_port = self.bound_port
+        if self.port == 0:
+            self.port = self._bound_port
+        logger.info(f"ACP Hub is ready on ws://{self.host}:{self._bound_port}.")
 
     async def stop(self) -> None:
         self._running = False
-        if self.server:
-            self.server.close()
-            await self.server.wait_closed()
+        server = self.server
+        self.server = None
+        if server is not None:
+            server.close()
+            sockets = list(self.all_sockets)
+            if sockets:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*(self._safe_close(ws) for ws in sockets), return_exceptions=True),
+                        timeout=1.0,
+                    )
+                except asyncio.TimeoutError:
+                    for ws in sockets:
+                        transport = getattr(ws, "transport", None)
+                        if transport is not None:
+                            transport.abort()
+            try:
+                await asyncio.wait_for(server.wait_closed(), timeout=1.5)
+            except asyncio.TimeoutError:
+                for ws in list(self.all_sockets):
+                    transport = getattr(ws, "transport", None)
+                    if transport is not None:
+                        transport.abort()
+                try:
+                    await asyncio.wait_for(server.wait_closed(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
         self.storage.clear_roster()
         logger.info("ACP Hub stopped.")
 
