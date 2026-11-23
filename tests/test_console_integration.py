@@ -2,19 +2,100 @@ import asyncio
 import io
 import json
 import os
+import socket
 import sys
 
 import pytest
 from rich.console import Console
 from websockets.server import serve
 
+from acp.avatars import resolve_avatar
 from acp.client import ACPClient
-from acp.console import HumanConsole
+from acp.console import HumanConsole, ProbeStatus, probe_hub
 from acp.hub import ACPHub
-from acp.protocol import EventType
+from acp.protocol import EventType, MessageMode
 
 
 pytestmark = pytest.mark.dt
+
+
+def _free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _spawn_pty(argv: list[str], env: dict[str, str]):
+    if sys.platform == "win32":
+        from winpty import PtyProcess
+        return PtyProcess.spawn(argv, env=env, dimensions=(24, 100))
+    from ptyprocess import PtyProcessUnicode
+    return PtyProcessUnicode.spawn(argv, env=env, dimensions=(24, 100))
+
+
+# TC-E2E-01
+async def test_unified_console_pty_autostarts_hub_and_receives_agent(tmp_path):
+    port = _free_tcp_port()
+    db_path = str(tmp_path / "e2e_unified.db")
+    uri = f"ws://127.0.0.1:{port}"
+    proc = None
+    agent = ACPClient(uri, "@codex")
+    try:
+        proc = _spawn_pty(
+            [sys.executable, "-m", "acp.cli", "hub", "--port", str(port), "--db", db_path],
+            env={**os.environ, "PYTHONUTF8": "1"},
+        )
+        screen = ""
+
+        async def wait_for_text(target_substrings: tuple[str, ...]):
+            nonlocal screen
+            while not all(sub in screen for sub in target_substrings):
+                chunk = await asyncio.to_thread(proc.read)
+                if not chunk:
+                    await asyncio.sleep(0.02)
+                    continue
+                screen += chunk
+
+        await asyncio.wait_for(wait_for_text(("Draft Input", "@user::>")), timeout=12)
+
+        await agent.connect()
+        await agent.send_message(
+            target="@user",
+            content="e2e unified message from codex",
+            mode=MessageMode.EXPLICIT,
+        )
+
+        codex_avatar = resolve_avatar("@codex")
+        await asyncio.wait_for(
+            wait_for_text(("@codex", "e2e unified message from codex", codex_avatar.lines[0].strip())),
+            timeout=10,
+        )
+        assert "Presence: @codex is now" not in screen
+
+        proc.write("/quit\r")
+
+        async def wait_for_exit():
+            nonlocal screen
+            while proc.isalive():
+                try:
+                    chunk = await asyncio.to_thread(proc.read)
+                    if chunk:
+                        screen += chunk
+                        continue
+                except (EOFError, OSError):
+                    pass
+                await asyncio.sleep(0.05)
+
+        await asyncio.wait_for(wait_for_exit(), timeout=8)
+        assert not proc.isalive()
+        assert await probe_hub(uri, timeout=0.6) == ProbeStatus.PORT_FREE
+    finally:
+        await agent.close()
+        if proc is not None and proc.isalive():
+            try:
+                proc.close(force=True)
+            except TypeError:
+                proc.terminate(force=True)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires Windows console input")
