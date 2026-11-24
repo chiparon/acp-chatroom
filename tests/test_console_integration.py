@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import sys
 
 import pytest
@@ -89,7 +90,52 @@ async def test_roster_refresh_and_presence_follow_wire_order(monkeypatch):
 
         monkeypatch.setattr(console.client, "get_roster", get_roster_before_resume)
         try:
-            await asyncio.wait_for(console.show_roster(), 5)
+            await asyncio.wait_for(console.sync_roster(display_table=False), 5)
+            assert "Roster" not in console._out_console.file.getvalue()
+            assert "Online (1): ● @claude IDLE" in console.render_header_lines(90)[0]
             assert console.format_online_agents_bar() == "Online Agents (1): @claude [IDLE]"
         finally:
             await console.client.close()
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows ConPTY")
+async def test_unified_console_pty_autostarts_hub_and_receives_agent(tmp_path):
+    from winpty import PtyProcess
+    from acp.console import probe_hub, ProbeResult
+    from acp.protocol import MessageMode
+
+    proc = PtyProcess.spawn(
+        [sys.executable, "-m", "acp.cli", "hub", "--port", "0", "--db", str(tmp_path / "pty.db")],
+        env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    screen = ""
+    async def expect(pattern):
+        async def read_until_match():
+            nonlocal screen
+            while True:
+                # Rich and ConPTY may insert SGR changes inside the URI or artwork.
+                plain = re.sub(r"\x1b\[[0-9;:]*m", "", screen)
+                if match := re.search(pattern, plain):
+                    return match
+                screen += await asyncio.to_thread(proc.read)
+        try:
+            return await asyncio.wait_for(read_until_match(), 10)
+        except asyncio.TimeoutError:
+            pytest.fail(f"Missing {pattern!r} in ConPTY output {screen[-4000:]!r}")
+
+    agent = ACPClient(handle="@codex")
+    try:
+        banner = await expect(r"Hub: Embedded (ws://127\.0\.0\.1:\d+) ")
+        agent.uri = banner[1]
+        assert "Draft Input" in screen and "@user::>" in screen
+        await agent.connect()
+        await agent.send_message("@user", "PTY delivery confirmed", MessageMode.EXPLICIT)
+        await expect("PTY delivery confirmed")
+        await expect("╰▀─▀╯")
+        assert "@codex" in screen and "Presence:" not in screen
+        proc.write("/quit\r")
+        await asyncio.wait_for(asyncio.to_thread(proc.wait), 3)
+        assert proc.exitstatus == 0
+        assert await probe_hub(agent.uri) == ProbeResult.PORT_FREE
+    finally:
+        proc.close(force=True)
+        await agent.close()

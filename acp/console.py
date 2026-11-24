@@ -5,19 +5,33 @@ Allows human operators to monitor multi-agent chat activity and inject explicit 
 
 import asyncio
 import codecs
-from contextlib import contextmanager
+from collections import deque
+from contextlib import contextmanager, ExitStack
+from enum import Enum
+import errno
+import json
+import logging
 import os
 import select
+import socket
 import sys
 import threading
 import time
 from typing import Callable, Optional
+from urllib.parse import urlsplit
+
+import click
 from rich.cells import cell_len
 from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
+from websockets.exceptions import WebSocketException
+from websockets.legacy.client import connect
 
+from .avatars import render_message_with_avatar, terminal_text
+from .hub import ACPHub
 from .protocol import MessageMode, AgentStatus, EventType
 from .client import ACPClient
 
@@ -126,8 +140,13 @@ class HumanConsole:
         self._history_index: Optional[int] = None
         self._draft_stash = ""
         self._dock_active = False
+        self.hub_mode = "client"
+        self.attach_notice = ""
+        self.keep_hub_running = False
+        self._viewport = None
+        self._feed_row = 3
+        self._feed_at_bottom = False
         self._dock_lines = 0
-        self._dock_cursor_row = 0
         self.roster_state: dict[str, str] = {}
 
     @property
@@ -151,101 +170,143 @@ class HumanConsole:
         line = f"Online Agents ({len(online)}): {summary}"
         return _clip_to_cells(line, max_cells) if max_cells is not None else line
 
-    def render_dock_lines(self, width: Optional[int] = None) -> tuple[list[str], int, int]:
-        """Build the bottom dock (separator, online agents bar, draft input, command bar)."""
-        cols = max(20, width if width is not None else self._out_console.width)
-        max_cells = cols - 1
-
-        label = "─ Draft Input (Enter send · Esc clear · /help manual) "
-        fill = "─" * max(0, max_cells - cell_len(label))
-        sep_line = _clip_to_cells(label + fill, max_cells)
-        agents_line = self.format_online_agents_bar(max_cells)
-
-        prompt = f"{self.handle}> "
-        prompt_cells = cell_len(prompt)
-        avail = max(4, max_cells - prompt_cells)
-        visible, rel_col = _window_around_cursor(self._input_buffer, self._cursor_pos, avail)
-        input_line = prompt + visible
-        cursor_col = prompt_cells + rel_col
-
-        cmd_bar_full = (
-            "Commands: /send @agent <msg> | /post [#topic] <msg> | "
-            "/broadcast <msg> | /read [topic] | /roster | /help | /quit"
-        )
-        cmd_bar_compact = "Cmds: /send | /post | /broadcast | /read | /roster | /help | /quit"
-        if cell_len(cmd_bar_full) <= max_cells:
-            cmd_line = cmd_bar_full
-        elif cell_len(cmd_bar_compact) <= max_cells:
-            cmd_line = cmd_bar_compact
-        else:
-            cmd_line = _clip_to_cells(cmd_bar_compact, max_cells)
-
-        return [sep_line, agents_line, input_line, cmd_line], 2, cursor_col
-
-    def _clear_dock(self) -> None:
-        if not self._dock_lines:
-            return
-        parts = ["\r"]
-        if self._dock_cursor_row > 0:
-            parts.append(f"\x1b[{self._dock_cursor_row}A")
-        parts.append("\x1b[J")
-        self._write_raw_stdout("".join(parts))
-        self._dock_lines = 0
-        self._dock_cursor_row = 0
-
-    def _draw_dock(self) -> None:
-        lines, cursor_row, cursor_col = self.render_dock_lines(self._out_console.width)
-        rendered = "\n".join(lines)
-        total = len(lines)
-        parts = ["\r", rendered]
-        up = total - 1 - cursor_row
-        if up > 0:
-            parts.append(f"\x1b[{up}A")
-        parts.append("\r")
-        if cursor_col > 0:
-            parts.append(f"\x1b[{cursor_col}C")
-        self._write_raw_stdout("".join(parts))
-        self._dock_lines = total
-        self._dock_cursor_row = cursor_row
-
-    def _redraw_dock(self) -> None:
+    def _header(self, width: int) -> Text:
+        cells = max(0, width - 1)
+        port = urlsplit(self.uri).port
+        left = f"ACP :{port} ({self.hub_mode})"
         with self._ui_lock:
-            if not self._dock_active:
-                return
-            self._clear_dock()
-            if self._running:
+            members = sorted((h, s) for h, s in self.roster_state.items()
+                             if h.casefold() != self.handle.casefold() and s != "offline")
+        count = len(members)
+        prefix = f"Online ({count}): "
+        if cells < 50:
+            left = ""
+        budget = cells - cell_len(left) - (2 if left else 0)
+        right = Text(prefix)
+        labels = {"starting": ("◌", "START", "cyan"), "busy": ("●", "BUSY", "yellow"),
+                  "idle": ("●", "IDLE", "green"), "blocked": ("●", "BLK", "red")}
+        for i, (handle, status) in enumerate(members):
+            dot, label, color = labels.get(status, ("●", status.upper(), "white"))
+            name = terminal_text(handle).replace("\n", " ")
+            item = Text.assemble((dot, color), f" {name} {label}")
+            separator = " · " if i else ""
+            remaining = count - i - 1
+            suffix = f" · +{remaining}" if remaining else ""
+            if right.cell_len + item.cell_len + cell_len(separator + suffix) > budget:
+                right.append(separator + f"+{count - i}")
+                break
+            right.append(separator)
+            right.append(item)
+        if not members:
+            right.append("○ waiting for agents")
+        right.truncate(max(0, budget))
+        return Text.assemble(left, " " * max(0, cells - cell_len(left) - right.cell_len), right)
+
+    def render_header_lines(self, width: int) -> list[str]:
+        return [self._header(width).plain, "─" * max(0, width - 1)]
+
+    def render_dock_lines(self, width: Optional[int] = None) -> tuple[list[str], int, int]:
+        cells = max(0, (width if width is not None else self._out_console.width) - 1)
+        label = "─ Draft Input (Enter send · Esc clear · /help manual) "
+        separator = _clip_to_cells(label + "─" * cells, cells)
+        prompt = _clip_to_cells(terminal_text(self.handle).replace("\n", " ") + "::> ", cells)
+        visible, offset = _window_around_cursor(self._input_buffer, self._cursor_pos, cells - cell_len(prompt))
+        commands = "/send /post /broadcast /read /roster /remove /prune /help /back /quit"
+        full = "Commands: " + commands.replace(" ", " | ")
+        return [separator, prompt + visible, _clip_to_cells(full if cell_len(full) <= cells else commands, cells)], 1, cell_len(prompt) + offset
+
+    def _refresh_header(self):
+        with self._ui_lock:
+            if self._dock_active and self._viewport and self._viewport[1] >= 8:
+                width, _ = self._viewport
+                with self._out_console.capture() as capture:
+                    self._out_console.print(self._header(width), end="")
+                self._write_raw_stdout(f"\x1b7\x1b[1;1H\x1b[2K{capture.get()}\x1b[0m\x1b8")
+
+    def _handle_resize(self):
+        width, height = self._out_console.size
+        if self._viewport == (width, height):
+            return
+        previous = self._viewport
+        self._viewport = (width, height)
+        self._dock_lines = 0
+        if height >= 8:
+            bottom = height - 3
+            self._feed_row = min(self._feed_row, bottom)
+            self._feed_at_bottom = self._feed_at_bottom and self._feed_row == bottom
+            if previous is None or previous[1] < 8:
+                clear = "\x1b[2J"
+            else:
+                clear = "".join(f"\x1b[{row};1H\x1b[2K"
+                                for row in range(previous[1] - 2, min(previous[1], bottom) + 1))
+            self._write_raw_stdout(f"{clear}\x1b[3;{bottom}r\x1b[2;1H\x1b[2K" + "─" * (width - 1))
+            self._refresh_header()
+        elif previous:
+            self._write_raw_stdout("\x1b[r\x1b[2J\x1b[H")
+
+    def _clear_dock(self):
+        if self._dock_lines and self._viewport[1] < 8:
+            self._write_raw_stdout("\r\x1b[1A\x1b[J")
+        self._dock_lines = 0
+
+    def _finish_dock(self):
+        with self._ui_lock:
+            if self._dock_active:
+                self._clear_dock()
+                self._write_raw_stdout(f"\x1b[r\x1b[0m\x1b[{self._out_console.height};1H\n")
+                self._dock_active = False
+
+    def _draw_dock(self):
+        self._handle_resize()
+        width, height = self._viewport
+        lines, _, col = self.render_dock_lines(width)
+        if height >= 8:
+            dock = "".join(f"\x1b[{row};1H\x1b[2K{line}" for row, line in enumerate(lines, height - 2))
+            self._write_raw_stdout(dock + f"\x1b[{height - 1};{col + 1}H")
+        else:
+            self._write_raw_stdout("\r" + "\r\n".join(lines) + f"\x1b[1A\x1b[{col + 1}G")
+        self._dock_lines = len(lines)
+
+    def _redraw_dock(self):
+        with self._ui_lock:
+            if self._dock_active:
+                self._clear_dock()
                 self._draw_dock()
 
     def _emit(self, fn: Callable[[], None]) -> None:
-        """Erase the active input dock, run fn() cleanly above it, and redraw the intact dock."""
         with self._ui_lock:
-            dock_was_active = self._dock_active
-            if dock_was_active:
-                self._clear_dock()
-            fn()
-            if dock_was_active and self._running:
+            if not self._dock_active:
+                fn()
+                return
+            if self._viewport != tuple(self._out_console.size):
                 self._draw_dock()
+            width, height = self._viewport
+            if height < 8:
+                self._clear_dock()
+                fn()
+                self._draw_dock()
+                return
+            with self._out_console.capture() as capture:
+                fn()
+            bottom = height - 3
+            parts = [f"\x1b[{self._feed_row};1H"]
+            for line in capture.get().splitlines():
+                if self._feed_at_bottom:
+                    parts.append("\r\n")
+                parts.extend(("\x1b[2K", line, "\x1b[0m"))
+                if self._feed_row < bottom:
+                    self._feed_row += 1
+                    parts.append("\r\n")
+                else:
+                    self._feed_at_bottom = True
+            _, _, col = self.render_dock_lines(width)
+            parts.append(f"\x1b[{height - 1};{col + 1}H")
+            self._write_raw_stdout("".join(parts))
 
     def print_banner(self) -> None:
-        self._emit(
-            lambda: self._out_console.print(
-                Panel.fit(
-                    "[bold cyan]🤖 ACP Multi-Agent Chatroom Console[/bold cyan]\n"
-                    "[dim]Observing agent-to-agent communication & Human-in-the-loop steering[/dim]\n\n"
-                    "Commands:\n"
-                    "  [green]/send @agent <message>[/green]         - Send explicit prompt directly to agent\n"
-                    "  [cyan]/post [#topic] <message>[/cyan]       - Post silent message to topic (default #general)\n"
-                    "  [magenta]/broadcast [--urgent] <msg>[/magenta]    - Broadcast message to all online agents\n"
-                    "  [yellow]/roster[/yellow]                        - List active online agents & status\n"
-                    "  [yellow]/read [topic][/yellow]                  - Read recent messages from topic\n"
-                    "  [red]/remove @agent[/red]                 - Disconnect & remove agent from roster\n"
-                    "  [red]/prune[/red]                         - Remove offline/stale entries from roster\n"
-                    "  [blue]/help[/blue] or [blue]/?[/blue]                    - Show full console manual\n"
-                    "  [red]/quit[/red] or [red]/exit[/red]                - Exit console",
-                    border_style="cyan",
-                )
-            )
-        )
+        mode = "Embedded" if self.hub_mode == "host" else "Attached"
+        self._emit(lambda: self._out_console.print(
+            f"ACP Chatroom · Hub: {mode} {self.uri} · /help for manual{self.attach_notice}", markup=False))
 
     def print_help(self) -> None:
         """Display full command manual and keyboard shortcuts above the input dock."""
@@ -262,6 +323,7 @@ class HumanConsole:
                     "  [red]/remove @agent[/red] (or [red]/kick[/red])      Disconnect @agent and remove from roster\n"
                     "  [red]/prune[/red]                         Remove all offline/stale entries from roster\n"
                     "  [blue]/help[/blue], [blue]/?[/blue], [blue]help[/blue]                Show this command reference\n"
+                    "  [cyan]/back[/cyan]                          Leave the console and keep the Hub online\n"
                     "  [red]/quit[/red], [red]/exit[/red], [red]:q[/red]             Disconnect and exit console\n\n"
                     "[bold]Input Box Shortcuts:[/bold]\n"
                     "  [dim]Left/Right, Home/End[/dim]           Move cursor inside active draft\n"
@@ -274,34 +336,19 @@ class HumanConsole:
         )
 
     def on_explicit_message(self, data: dict) -> None:
-        msg = data.get("message", {})
-        sender = escape(str(msg.get("sender", "@unknown")))
-        target = escape(str(msg.get("target", "@unknown")))
-        content = escape(str(msg.get("content", "")))
-        time_str = str(msg.get("created_at", ""))[:19].replace("T", " ")
-
-        self._emit(
-            lambda: self._out_console.print(
-                f"[dim]{time_str}[/dim] [bold magenta]⚡ EXPLICIT[/bold magenta] "
-                f"[bold yellow]{sender}[/bold yellow] ➔ [bold green]{target}[/bold green]:\n"
-                f"   [white]{content}[/white]"
-            )
-        )
+        self._message(data, "explicit")
 
     def on_silent_message(self, data: dict) -> None:
-        msg = data.get("message", {})
-        sender = escape(str(msg.get("sender", "@unknown")))
-        topic = escape(str(msg.get("topic", "general")))
-        content = escape(str(msg.get("content", "")))
-        time_str = str(msg.get("created_at", ""))[:19].replace("T", " ")
+        self._message(data, "silent")
 
-        self._emit(
-            lambda: self._out_console.print(
-                f"[dim]{time_str}[/dim] [bold blue]📢 BOARD [#{topic}][/bold blue] "
-                f"[bold yellow]{sender}[/bold yellow]:\n"
-                f"   [white]{content}[/white]"
-            )
-        )
+    def _print_card(self, message):
+        self._out_console.print(render_message_with_avatar(message, self._out_console.width))
+
+    def _message(self, data, mode):
+        message = {**data.get("message", {}), "mode": mode}
+        if "delivered" in data:
+            message["delivered"] = data["delivered"]
+        self._emit(lambda: self._print_card(message))
 
     def on_presence_change(self, data: dict) -> None:
         raw_handle = str(data.get("handle", ""))
@@ -313,34 +360,27 @@ class HumanConsole:
                         self.roster_state.pop(key, None)
                 else:
                     self.roster_state[raw_handle] = raw_status
-        handle = escape(raw_handle)
-        color = "green" if raw_status == "idle" else ("yellow" if raw_status == "busy" else "red")
-        self._emit(
-            lambda: self._out_console.print(
-                f"[dim]• Presence:[/dim] [bold]{handle}[/bold] is now [{color}]{escape(raw_status.upper())}[/{color}]"
-            )
-        )
+        self._refresh_header()
 
     def on_broadcast(self, data: dict) -> None:
-        msg = data["message"]
-        self._emit(
-            lambda: self._out_console.print(
-                f"{msg['mode'].upper()} #{msg['id']} {msg['sender']}: {msg['content']}",
-                markup=False,
-            )
-        )
+        self._message(data, data["message"]["mode"])
 
     async def show_roster(self) -> None:
-        # Apply the snapshot in the reader, before it dispatches newer presence events.
-        await self.client.get_roster(on_roster=self._display_roster)
+        await self.sync_roster(display_table=True)
 
-    def _display_roster(self, roster: list[dict]) -> None:
+    async def sync_roster(self, display_table=False):
+        await self.client.get_roster(on_roster=lambda rows: self._display_roster(rows, display_table))
+
+    def _display_roster(self, roster: list[dict], display_table=True) -> None:
         with self._ui_lock:
             self.roster_state = {
                 str(r.get("handle", "")): str(r.get("status", "offline")).lower()
                 for r in roster
                 if r.get("handle") and r.get("handle") != self.handle
             }
+        self._refresh_header()
+        if not display_table:
+            return
         table = Table(title="👥 Active Agent Roster", border_style="blue")
         table.add_column("Agent Handle", style="cyan", no_wrap=True)
         table.add_column("Status", style="bold")
@@ -364,7 +404,8 @@ class HumanConsole:
         raw = raw.strip()
         if not raw:
             return True
-        if raw in ("/quit", "/exit", ":q"):
+        if raw in ("/back", "/quit", "/exit", ":q"):
+            self.keep_hub_running = raw == "/back"
             self._running = False
             return False
         if raw in ("/help", "/?", "help"):
@@ -384,7 +425,7 @@ class HumanConsole:
             target = parts[1]
             msg = parts[2]
             self._schedule(
-                self.client.send_message(
+                self._send(
                     target=target,
                     content=msg,
                     mode=MessageMode.EXPLICIT,
@@ -408,7 +449,7 @@ class HumanConsole:
                 self._emit(lambda: self._out_console.print("[red]Usage: /post [#topic] <message>[/red]"))
                 return True
             self._schedule(
-                self.client.send_message(
+                self._send(
                     target=f"#{topic}",
                     content=msg,
                     mode=MessageMode.SILENT,
@@ -428,7 +469,7 @@ class HumanConsole:
                 self._emit(lambda: self._out_console.print("[red]Usage: /broadcast [--urgent] <message>[/red]"))
                 return True
             self._schedule(
-                self.client.send_message(
+                self._send(
                     target="#general",
                     content=rest,
                     mode=MessageMode.URGENT if urgent else MessageMode.BROADCAST,
@@ -454,6 +495,22 @@ class HumanConsole:
             )
         return True
 
+    async def _send(self, **message):
+        if self.hub_mode == "disconnected":
+            self._emit(lambda: self._out_console.print("Send failed: Hub disconnected."))
+            return
+        try:
+            response = await self.client.send_message(**message)
+            if response.get("status") != "ok":
+                raise ValueError(response.get("error", "Send failed"))
+        except Exception as exc:
+            self._emit(lambda: self._out_console.print(f"Send failed: {exc}", markup=False))
+            return
+        mode = message["mode"]
+        if mode == MessageMode.BROADCAST or (mode == MessageMode.EXPLICIT and
+                (not response.get("delivered") or message["target"].lstrip("@").lower() != self.handle[1:].lower())):
+            self._message({"message": message, **response}, mode.value)
+
     def handle_key(self, key: str, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         """Apply one keystroke or named navigation key to the separated draft input buffer."""
         submit_line: Optional[str] = None
@@ -466,10 +523,6 @@ class HumanConsole:
                 self._draft_stash = ""
                 if submit_line.strip():
                     self._history.append(submit_line)
-                if self._dock_active:
-                    self._clear_dock()
-                    if submit_line.strip():
-                        self._out_console.print(f"[dim]{escape(self.handle)}> {escape(submit_line)}[/dim]")
             elif key == "\x03":
                 self._running = False
             elif key == "\x04" and not self._input_buffer:
@@ -529,20 +582,16 @@ class HumanConsole:
 
             if self._dock_active:
                 if not self._running:
-                    self._clear_dock()
-                    self._dock_active = False
+                    self._finish_dock()
                 else:
-                    if submit_line is None:
-                        self._clear_dock()
-                    self._draw_dock()
+                    self._redraw_dock()
 
         if submit_line is not None and submit_line.strip():
             self.handle_command(submit_line, loop=loop)
             if not self._running:
                 with self._ui_lock:
                     if self._dock_active:
-                        self._clear_dock()
-                        self._dock_active = False
+                        self._finish_dock()
 
     def _read_tty_keys(self, loop: asyncio.AbstractEventLoop) -> None:
         if os.name == "nt":
@@ -594,21 +643,20 @@ class HumanConsole:
 
     async def run(self) -> None:
         self._running = True
-        self.print_banner()
-
-        try:
-            await self.client.connect(initial_status=AgentStatus.IDLE, role="console")
-        except Exception as e:
-            self._out_console.print(f"[bold red]❌ Failed to connect to ACP Hub at {self.uri}: {e}[/bold red]")
-            return
-
         self.client.on(EventType.EXPLICIT_MESSAGE.value, self.on_explicit_message)
         self.client.on(EventType.SILENT_MESSAGE.value, self.on_silent_message)
         self.client.on(EventType.BROADCAST.value, self.on_broadcast)
         self.client.on(EventType.PRESENCE_CHANGE.value, self.on_presence_change)
 
-        await self.show_roster()
+        await self.client.connect(initial_status=AgentStatus.IDLE, role="console")
+        try:
+            await self.sync_roster()
+            await self._input_loop()
+        finally:
+            self._running = False
+            await self.client.close()
 
+    async def _input_loop(self):
         loop = asyncio.get_running_loop()
 
         def user_input_thread(tty_raw: bool):
@@ -626,25 +674,31 @@ class HumanConsole:
                 self._emit(lambda: self._out_console.print(f"[red]Error: {e}[/red]"))
 
         with _raw_tty_mode() as tty_raw:
-            if tty_raw:
-                with self._ui_lock:
-                    self._dock_active = True
-                    self._draw_dock()
-
-            input_thread = threading.Thread(target=user_input_thread, args=(tty_raw,), daemon=True)
-            input_thread.start()
-
             try:
+                if tty_raw:
+                    with self._ui_lock:
+                        self._dock_active = True
+                        self._draw_dock()
+
+                self.print_banner()
+                input_thread = threading.Thread(target=user_input_thread, args=(tty_raw,), daemon=True)
+                input_thread.start()
+
                 while self._running:
                     await asyncio.sleep(0.3)
+                    with self._ui_lock:
+                        if self._dock_active and self._viewport != tuple(self._out_console.size):
+                            self._redraw_dock()
+                        if not self.client.connected and self.hub_mode != "disconnected":
+                            self.hub_mode = "disconnected"
+                            self._refresh_header()
+                            self._emit(lambda: self._out_console.print("Hub disconnected. Use /quit to exit."))
             finally:
                 self._running = False
                 with self._ui_lock:
                     if self._dock_active:
-                        self._clear_dock()
-                        self._dock_active = False
-                await self.client.close()
-                self._out_console.print("\n[dim]Console disconnected.[/dim]")
+                        self._finish_dock()
+                self._emit(lambda: self._out_console.print("[dim]Console disconnected.[/dim]"))
 
     async def _do_read(self, topic: str) -> None:
         messages = await self.client.read_board(topic=topic, reader=self.handle, unread_only=False, limit=20)
@@ -655,11 +709,7 @@ class HumanConsole:
             for idx, m in enumerate(messages):
                 if idx > 0:
                     self._out_console.print()
-                t = str(m.get("created_at", ""))[:19].replace("T", " ")
-                sender = escape(str(m.get("sender", "@unknown")))
-                content = escape(str(m.get("content", "")))
-                self._out_console.print(f"  [dim]{t}[/dim] [yellow]{sender}[/yellow]:")
-                self._out_console.print(f"    {content}")
+                self._print_card(m)
             self._out_console.print()
         self._emit(_render)
 
@@ -677,6 +727,7 @@ class HumanConsole:
         with self._ui_lock:
             for key in [k for k in self.roster_state if k.lower() == handle.lower()]:
                 self.roster_state.pop(key, None)
+        self._refresh_header()
         self._emit(lambda: self._out_console.print(f"[green]✓ Removed {escape(handle)}[/green]"))
 
     async def _do_prune(self) -> None:
@@ -694,6 +745,7 @@ class HumanConsole:
             removed_lower = {h.lower() for h in removed}
             for key in [k for k in self.roster_state if k.lower() in removed_lower]:
                 self.roster_state.pop(key, None)
+        self._refresh_header()
         if removed:
             names = escape(", ".join(removed))
             self._emit(lambda: self._out_console.print(f"[green]✓ Pruned {len(removed)} offline agent(s): {names}[/green]"))
@@ -707,3 +759,146 @@ def start_console(uri: str = "ws://127.0.0.1:8765", handle: str = "@user") -> No
         asyncio.run(hc.run())
     except KeyboardInterrupt:
         pass
+
+
+class ProbeResult(Enum):
+    ALIVE_HUB = "alive"
+    PORT_FREE = "free"
+    PORT_OCCUPIED_NON_ACP = "occupied"
+
+
+async def probe_hub(uri: str, timeout: float = 0.8) -> ProbeResult:
+    target = urlsplit(uri)
+    port = target.port if target.port is not None else (443 if target.scheme == "wss" else 80)
+    loop = asyncio.get_running_loop()
+
+    async def open_socket():
+        addresses = await loop.getaddrinfo(target.hostname, port, type=socket.SOCK_STREAM)
+        last_error = None
+        for family, socktype, proto, _, address in addresses:
+            sock = socket.socket(family, socktype, proto)
+            sock.setblocking(False)
+            try:
+                await loop.sock_connect(sock, address)
+                return sock
+            except OSError as exc:
+                last_error = exc
+                sock.close()
+            except BaseException:
+                sock.close()
+                raise
+        raise last_error or OSError("No addresses found")
+
+    async def ping(sock):
+        async with connect(uri, sock=sock, close_timeout=0.05) as ws:
+            await ws.send(json.dumps({"action": "ping", "req_id": "probe"}))
+            data = json.loads(await ws.recv())
+            return isinstance(data, dict) and data.get("event") == "pong"
+
+    # Windows retries refused SYNs before reporting WSAECONNREFUSED. Give TCP
+    # that time while keeping the ACP handshake on an occupied port short.
+    try:
+        sock = await asyncio.wait_for(open_socket(), max(5.0, timeout) if os.name == "nt" else timeout)
+    except ConnectionRefusedError:
+        return ProbeResult.PORT_FREE
+    try:
+        if await asyncio.wait_for(ping(sock), timeout):
+            return ProbeResult.ALIVE_HUB
+    except (asyncio.TimeoutError, WebSocketException, ValueError, EOFError, OSError):
+        pass
+    finally:
+        sock.close()
+    return ProbeResult.PORT_OCCUPIED_NON_ACP
+
+
+@contextmanager
+def _silence_embedded_hub_logging():
+    records = deque(maxlen=200)
+    class Buffer(logging.Handler):
+        def emit(self, record):
+            records.append(self.format(record))
+
+    handler = Buffer()
+    with ExitStack() as restore:
+        for name in ("acp.hub", "websockets", "websockets.server", "websockets.protocol"):
+            logger = logging.getLogger(name)
+            restore.callback(setattr, logger, "handlers", logger.handlers)
+            restore.callback(setattr, logger, "propagate", logger.propagate)
+            restore.callback(logger.setLevel, logger.level)
+            logger.handlers = [handler]
+            logger.propagate = False
+            logger.setLevel(logging.INFO)
+        yield
+
+
+class UnifiedConsoleRunner:
+    def __init__(self, uri="ws://127.0.0.1:8765", handle="@user", db_path="acp_chatroom.db",
+                 auto_hub=True, bind_host=None, bind_port=None, explicit_hub_options=False):
+        self.uri = uri
+        self.handle = handle
+        self.db_path = db_path
+        self.auto_hub = auto_hub
+        self.bind_host = bind_host
+        self.bind_port = bind_port
+        self.explicit_hub_options = explicit_hub_options
+        self.owns_hub = False
+        self.hub = None
+
+    async def run(self):
+        target = urlsplit(self.uri)
+        host = target.hostname
+        if not host or target.scheme not in ("ws", "wss"):
+            raise ValueError("Expected a ws:// or wss:// Hub URI")
+        port = target.port
+        if port is None:
+            port = 443 if target.scheme == "wss" else 80
+        allowed = self.auto_hub and target.scheme == "ws" and (
+            host in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::") or self.bind_host == host)
+        local = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+        address = f"[{local}]" if ":" in local else local
+        if host != local:
+            self.uri = target._replace(netloc=f"{address}:{port}").geturl()
+        state = ProbeResult.PORT_FREE if port == 0 else await probe_hub(self.uri)
+        with ExitStack() as resources:
+            if state == ProbeResult.PORT_FREE and allowed:
+                logs = resources.enter_context(ExitStack())
+                logs.enter_context(_silence_embedded_hub_logging())
+                hub = ACPHub(host=self.bind_host or host, port=self.bind_port if self.bind_port is not None else port,
+                             db_path=self.db_path, defer_roster_reset=True)
+                try:
+                    await hub.start()
+                except OSError as exc:
+                    if exc.errno != errno.EADDRINUSE or await probe_hub(self.uri) != ProbeResult.ALIVE_HUB:
+                        raise
+                    logs.close()
+                else:
+                    self.hub = hub
+                    self.owns_hub = True
+                    if port == 0:
+                        self.uri = f"ws://{address}:{hub.bound_port}"
+            elif state == ProbeResult.PORT_FREE:
+                raise ValueError(f"No ACP Hub listening at {self.uri}")
+            elif state != ProbeResult.ALIVE_HUB:
+                raise ValueError(f"No ACP pong from {self.uri} (occupied by a non-ACP service or timed out)")
+            try:
+                self.console = HumanConsole(uri=self.uri, handle=self.handle)
+                self.console.hub_mode = "host" if self.owns_hub else "client"
+                if self.explicit_hub_options and not self.owns_hub:
+                    self.console.attach_notice = " · Using the existing Hub and its database"
+                await self.console.run()
+                if self.owns_hub and self.console.keep_hub_running:
+                    click.echo(f"Hub online at {self.uri}. Rejoin with acp console --uri {self.uri} "
+                               "from another terminal. Ctrl+C stops the Hub.")
+                    await self.hub.server.wait_closed()
+            finally:
+                if self.owns_hub:
+                    await self.hub.stop()
+
+
+def start_unified_console(**options):
+    try:
+        asyncio.run(UnifiedConsoleRunner(**options).run())
+    except KeyboardInterrupt:
+        pass
+    except (OSError, ValueError, WebSocketException) as exc:
+        raise click.ClickException(str(exc)) from exc

@@ -23,6 +23,8 @@ def test_resume_profile(agent, native_args, canonical):
     session_id = uuid4()
     launcher = AgentLauncher(agent, None, session_id=str(session_id).upper())
     assert launcher.argv[-2:] == [*native_args, str(session_id)]
+    if canonical == "codex":
+        assert launcher.argv[-4:-2] == ["--disable", "hooks"]
     assert launcher.session.harness == canonical
     assert launcher.session == agent_registry()[canonical].session_key(str(session_id))
 

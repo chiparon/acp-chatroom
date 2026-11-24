@@ -11,7 +11,7 @@ from rich.table import Table
 
 from .hub import run_hub
 from .launcher import launch_agent
-from .console import start_console
+from .console import start_unified_console
 from .client import ACPClient, sync_send, sync_read, sync_roster
 from .protocol import ActionType, MessageMode
 from .agents import agent_registry
@@ -21,10 +21,23 @@ from .storage import Storage
 rich_console = Console()
 
 
-@click.group()
-def cli():
+def _interactive():
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+@click.group(invoke_without_command=True)
+@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765")
+@click.option("--as", "--handle", "-a", "handle", default="@user")
+@click.option("--db", default="acp_chatroom.db")
+@click.pass_context
+def cli(ctx, uri, handle, db):
     """ACP (Agent Communication Protocol) - Multi-Agent Chatroom Toolkit"""
-    pass
+    ctx.ensure_object(dict).update(uri=uri, handle=handle, db_path=db)
+    if ctx.invoked_subcommand is None:
+        if _interactive():
+            start_unified_console(**ctx.obj, auto_hub=True)
+        else:
+            click.echo(ctx.get_help())
 
 
 # -------------------------------------------------------------
@@ -33,10 +46,21 @@ def cli():
 @cli.command("hub")
 @click.option("--host", default="127.0.0.1", help="Host interface to bind to")
 @click.option("--port", default=8765, type=int, help="Port to listen on")
-@click.option("--db", default="acp_chatroom.db", help="SQLite database path")
-def hub_command(host, port, db):
+@click.option("--db", help="SQLite database path")
+@click.option("--as", "--handle", "-a", "handle")
+@click.option("--headless", is_flag=True, help="Run the Hub without a console")
+@click.pass_obj
+def hub_command(defaults, host, port, db, handle, headless):
     """Start the central ACP Chatroom WebSocket Hub server."""
-    run_hub(host=host, port=port, db_path=db)
+    db = db or defaults["db_path"]
+    if headless or not _interactive():
+        run_hub(host=host, port=port, db_path=db)
+        return
+    local = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(host, host)
+    address = f"[{local}]" if ":" in local else local
+    start_unified_console(uri=f"ws://{address}:{port}", handle=handle or defaults["handle"],
+                          bind_host=host, bind_port=port, db_path=db, auto_hub=True,
+                          explicit_hub_options=db != "acp_chatroom.db" or host != "127.0.0.1")
 
 
 # -------------------------------------------------------------
@@ -86,11 +110,15 @@ def resume_command(agent, session_id, handle, uri, non_interactive, output_statu
 # 3. acp console
 # -------------------------------------------------------------
 @cli.command("console")
-@click.option("--uri", envvar="ACP_HUB_URI", default="ws://127.0.0.1:8765", help="ACP Hub URI")
-@click.option("--as", "--handle", "-a", "handle", default="@user", help="Your user handle")
-def console_command(uri, handle):
+@click.option("--uri", help="ACP Hub URI")
+@click.option("--as", "--handle", "-a", "handle", help="Your user handle")
+@click.option("--db", help="SQLite database path")
+@click.option("--no-auto-hub", is_flag=True, help="Only attach to an existing Hub")
+@click.pass_obj
+def console_command(defaults, uri, handle, db, no_auto_hub):
     """Open the human observer & interaction terminal."""
-    start_console(uri=uri, handle=handle)
+    start_unified_console(uri=uri or defaults["uri"], handle=handle or defaults["handle"],
+                          db_path=db or defaults["db_path"], auto_hub=not no_auto_hub)
 
 
 # -------------------------------------------------------------
