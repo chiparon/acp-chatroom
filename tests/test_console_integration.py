@@ -42,7 +42,9 @@ async def test_console_posts_emoji_and_keeps_accepting_commands(tmp_path):
                 screen += await asyncio.to_thread(proc.read)
 
         await asyncio.wait_for(wait_for_dock(), 10)
-        for text in ("中文😀🚀", "still typing"):
+        # Split an emoji across the 256-unit drain boundary; keep key-like words literal.
+        long_text = "中" * 249 + "😀" + "中文LEFT" * 300
+        for text in ("中文😀🚀", long_text, "still typing"):
             proc.write(f"/post {text}\r")
             event = await asyncio.wait_for(posts.get(), 5)
             assert event["message"]["content"] == text
