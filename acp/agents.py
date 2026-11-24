@@ -20,6 +20,7 @@ class AgentProfile:
     permission_options: tuple[str, ...] = ()
     resume_args: tuple[str, ...] = ()
     config_env: str | None = None
+    resume_aliases: tuple[tuple[str, ...], ...] = ()
 
     def session_key(self, session_id: str) -> SessionKey:
         if not self.resume_args and self.executable != "dsh":
@@ -27,7 +28,7 @@ class AgentProfile:
         try:
             session_id = str(uuid.UUID(session_id))
         except ValueError:
-            if self.executable in {"codex", "claude"}:
+            if self.executable in {"codex", "claude", "grok"}:
                 raise ValueError(f"{self.executable} requires a native session UUID") from None
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]*", session_id):
                 raise ValueError("Expected a native session ID") from None
@@ -69,6 +70,11 @@ def agent_registry() -> dict[str, AgentProfile]:
                               permission_options=("-s", "--sandbox", "-a", "--ask-for-approval", "--approve-for-me"),
                               resume_args=("resume",), config_env="CODEX_HOME"),
     }
+    grok = AgentProfile("grok", "--always-approve", ".grok/skills", ".grok/skills",
+                        permission_options=("--permission-mode", "--yolo"),
+                        resume_args=("--resume",), config_env="GROK_HOME",
+                        resume_aliases=(("-r",),))
+    profiles["grok"] = profiles["grokbuild"] = grok
     for entry in entry_points(group="acp_chatroom.agents"):
         if entry.name in profiles:
             raise ValueError(f"Duplicate agent profile: {entry.name}")

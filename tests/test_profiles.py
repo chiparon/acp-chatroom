@@ -17,6 +17,8 @@ from acp.protocol import format_explicit_prompt
     ("agy", "agy", "--dangerously-skip-permissions"),
     ("antigravity", "agy", "--dangerously-skip-permissions"),
     ("codex", "codex", "--dangerously-bypass-approvals-and-sandbox"),
+    ("grok", "grok", "--always-approve"),
+    ("grokbuild", "grok", "--always-approve"),
 ])
 def test_bare_launch_uses_registered_defaults(name, executable, flag):
     launcher = AgentLauncher(name, "@custom")
@@ -29,6 +31,9 @@ def test_custom_command_preserves_arguments():
     assert launcher.argv[1:] == ["--no-daemon", "--sandbox", "read-only"]
     assert AgentLauncher("codex --no-daemon", "gpt2").argv.count("--no-daemon") == 1
     assert AgentLauncher("claude --continue", "@worker").argv[1:] == ["--dangerously-skip-permissions", "--continue"]
+    assert AgentLauncher("grok --permission-mode plan", "@worker").argv[1:] == ["--permission-mode", "plan"]
+    assert AgentLauncher("grok --yolo", "@worker").argv[1:] == ["--yolo"]
+    assert AgentLauncher("grok", "@worker").client.supports_model_switch
 
 
 def test_prompt_preserves_content_and_sender():
@@ -53,7 +58,7 @@ def test_multiline_paste_is_atomic_and_submits_once():
         assert writes == ["\x1b[200~@one:  一\n二[201~ \x1b[201~", "\r"]
 
 
-@pytest.mark.parametrize("name", ["codex", "agy", "claude", "dsh"])
+@pytest.mark.parametrize("name", ["codex", "agy", "claude", "dsh", "grok"])
 def test_agent_local_install(tmp_path, monkeypatch, name):
     monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path))
     monkeypatch.delenv("DSH_HOME", raising=False)
@@ -75,6 +80,15 @@ def test_dsh_custom_home_and_workspace_install(tmp_path, monkeypatch):
     assert (tmp_path / ".agents/skills/acp-chatroom/SKILL.md").is_file()
     assert AgentLauncher("dsh", None).argv[1:] == ["--profile", "acp"]
     assert AgentLauncher("dsh web", "custom").profile is None
+
+
+def test_grok_home_and_workspace_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "custom"))
+    runner = CliRunner()
+    assert runner.invoke(cli, ["install", "grokbuild"]).exit_code == 0
+    assert (tmp_path / "custom/skills/acp-chatroom/SKILL.md").is_file()
+    assert runner.invoke(cli, ["install", "grok", "--workspace", str(tmp_path)]).exit_code == 0
+    assert (tmp_path / ".grok/skills/acp-chatroom/SKILL.md").is_file()
 
 
 def test_init_skills_preserves_workspace_instructions(tmp_path):

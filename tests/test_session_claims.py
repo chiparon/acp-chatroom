@@ -1,3 +1,4 @@
+import os
 from dataclasses import replace
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -18,6 +19,7 @@ from acp.storage import Storage
     ("codex", ["resume"], "codex"),
     ("claudecode", ["--resume"], "claude"),
     ("antigravity", ["--conversation"], "agy"),
+    ("grokbuild", ["--resume"], "grok"),
 ])
 def test_resume_profile(agent, native_args, canonical):
     session_id = uuid4()
@@ -25,6 +27,23 @@ def test_resume_profile(agent, native_args, canonical):
     assert launcher.argv[-2:] == [*native_args, str(session_id)]
     assert launcher.session.harness == canonical
     assert launcher.session == agent_registry()[canonical].session_key(str(session_id))
+
+
+def test_grok_resume_accepts_short_flag_and_home(tmp_path, monkeypatch):
+    profile = agent_registry()["grok"]
+    with pytest.raises(ValueError, match="native session UUID"):
+        profile.session_key("latest")
+    native_id = str(uuid4())
+    monkeypatch.setenv("GROK_HOME", str(tmp_path / "home"))
+    key = profile.session_key(native_id)
+    assert key.harness == "grok"
+    assert key.scope == os.path.normcase(str((tmp_path / "home").resolve()))
+    legacy = AgentLauncher(f"grok -r {native_id}", "builder")
+    assert legacy.session == key
+    assert legacy.argv[1:] == ["--always-approve", "-r", native_id]
+    resumed = AgentLauncher("grok", None, session_id=native_id)
+    assert resumed.session == key
+    assert resumed.argv[1:] == ["--always-approve", "--resume", native_id]
 
 
 def test_native_id_and_profile_scope(tmp_path, monkeypatch):

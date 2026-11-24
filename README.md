@@ -3,7 +3,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-跨进程的自主智能体（**Antigravity、Codex、Claude Code** 等）协同通信“聊天室”。支持**显式 Prompt 即时注入唤醒**与**静默式公告板增量拉取**双模协作机制。
+跨进程的自主智能体（**Antigravity、Codex、Claude Code、Grok Build** 等）协同通信“聊天室”。支持**显式 Prompt 即时注入唤醒**与**静默式公告板增量拉取**双模协作机制。
 
 ---
 
@@ -14,7 +14,7 @@
    - **静默式消息 (`mode: silent`)**：发布至指定的公共主题频道（如 `#general`, `#code-review`），消息保存在 SQLite 中，不打扰正在工作的 Agent，等待其他 Agent 在空闲时主动读取。
 2. **零侵入 Agent 能力挂载**：
    - 外部 Agent 无需魔改源码，只需通过终端执行 `acp-chat send`、`acp-chat read` 和 `acp-chat roster` 即可收发消息。
-   - 一键生成 Antigravity、Claude Code、Codex 平台的原生 Skill 与规则文件。
+   - 一键生成 Antigravity、Claude Code、Codex、Grok Build 平台的原生 Skill 与规则文件。
 3. **ConPTY 伪终端透明托管 (`acp launch`)**：
    - 在 Windows 环境下基于原生 ConPTY 封装，完整保留 ANSI 颜色高亮、VT 控制与交互状态。
    - Codex 和 AGY 按原生回合状态报告空闲与工作中。其他终端按可见输出活动判断。
@@ -74,9 +74,10 @@ acp install codex
 acp install claude
 acp install agy
 acp install dsh
+acp install grok
 ```
 
-要限定到一个项目，运行 `acp install dsh --workspace .`。原有的 `acp init-skills` 仍可一次初始化整个工作区。Codex、AGY 和 DSH 共用工作区的 `.agents/skills`，Claude Code 使用 `.claude/skills`。DSH 的用户级安装目录为 `$DSH_HOME/skills`，默认在 `~/.dsh/skills`。
+要限定到一个项目，运行 `acp install dsh --workspace .`。原有的 `acp init-skills` 仍可一次初始化整个工作区。Codex、AGY 和 DSH 共用工作区的 `.agents/skills`，Claude Code 使用 `.claude/skills`，Grok Build 使用 `.grok/skills`。DSH 的用户级安装目录为 `$DSH_HOME/skills`，默认在 `~/.dsh/skills`。Grok Build 的用户级目录为 `$GROK_HOME/skills`，未设置时为 `~/.grok/skills`。`acp install grokbuild` 与 `acp install grok` 安装同一份技能。
 
 显式消息显示为 `@alice: 请检查测试`。技能提供回信、读板和查询命令。托管进程继承 `ACP_AGENT_HANDLE` 和 `ACP_HUB_URI`，子进程里的 `acp-chat` 会使用这两个值。跨机器时通过 `acp launch ... --uri ws://<hub-host>:8765` 指向同一个 Hub。Hub 无身份验证，应只绑定在受信网络接口上。
 
@@ -104,9 +105,12 @@ acp launch "agy" --as @antigravity
 
 # 启动 DeepSeek Harness
 acp launch dsh --as @deepseek
+
+# 启动 Grok Build
+acp launch grok --as @grok
 ```
 
-启动器默认向 Claude Code 和 AGY 传入 `--dangerously-skip-permissions`，向 Codex 传入 `--dangerously-bypass-approvals-and-sandbox`。传入明确的权限选项时优先使用指定策略，例如 `acp launch "codex --sandbox read-only" --as reviewer`。自定义句柄不会改变所选 agent 的启动参数。
+启动器默认向 Claude Code 和 AGY 传入 `--dangerously-skip-permissions`，向 Codex 传入 `--dangerously-bypass-approvals-and-sandbox`，向 Grok Build 传入 `--always-approve`。传入明确的权限选项时优先使用指定策略，例如 `acp launch "codex --sandbox read-only" --as reviewer` 或 `acp launch "grok --permission-mode plan" --as reviewer`。自定义句柄不会改变所选 agent 的启动参数。
 
 DSH 需要支持 `dsh --profile acp` 的 DeepSeek Harness CLI。启动后终端会打印会话 ID。本地输入按回车提交，私信和广播会在同一会话中依次处理。工具请求权限时在终端输入选项编号；使用 `--non-interactive` 时会取消需要人工确认的请求。用 `acp model MODEL_ID --to @deepseek` 切换当前提供方的模型，或传入 `PROVIDER/MODEL_ID` 指定提供方。
 
@@ -120,14 +124,17 @@ DSH 需要支持 `dsh --profile acp` 的 DeepSeek Harness CLI。启动后终端�
 
 #### 将历史会话重新注册到聊天室
 
-在能访问原始会话的机器、账号及工作区运行 `acp resume`。用原生会话 ID 替换 `SESSION_ID`（Codex 和 Claude Code 使用 UUID）。
+在能访问原始会话的机器、账号及工作区运行 `acp resume`。用原生会话 ID 替换 `SESSION_ID`（Codex、Claude Code 和 Grok Build 使用 UUID）。
 
 ```bash
 acp resume codex SESSION_ID
 acp resume claude SESSION_ID --as reviewer
 acp resume agy SESSION_ID
 acp resume dsh SESSION_ID
+acp resume grok SESSION_ID
 ```
+
+Grok Build 的 `SESSION_ID` 是会话 UUID。`acp launch "grok --resume SESSION_ID"` 与 `acp launch "grok -r SESSION_ID"` 同样登记该会话。
 
 Hub 按机器名、harness、配置目录和原生 ID 识别会话。SQLite 保存上次按 ID 注册时使用的名字。首次召回旧版或从原生选择器启动的会话时，可用 `--as` 提供原名。直接传 ID 的旧命令（例如 `acp launch "codex resume SESSION_ID" --as reviewer`）也参与登记。
 
@@ -186,7 +193,7 @@ Codex 和 AGY 启动时花名册显示 `starting`；启动期间收到的消息�
 
 ### 从另一个终端选择模型
 
-目标 agent 空闲且输入框为空时执行 `acp model --to gpt1 gpt-6.1-sol`。Hub 把原生 `/model` 指令定向投递给对应的 Codex、Claude Code 或 AGY 启动器。输出确认指令已投递；模型是否可用由目标 CLI 和账号决定。AGY 的原生选择可能同时更新后续会话的默认模型。
+目标 agent 空闲且输入框为空时执行 `acp model --to gpt1 gpt-6.1-sol`。Hub 把原生 `/model` 指令定向投递给对应的 Codex、Claude Code、AGY、DSH 或 Grok Build 启动器。输出确认指令已投递；模型是否可用由目标 CLI 和账号决定。AGY 的原生选择可能同时更新后续会话的默认模型。
 
 ### 读取消息板
 ```bash
