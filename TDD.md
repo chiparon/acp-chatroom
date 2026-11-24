@@ -1,7 +1,7 @@
 # 测试驱动开发方案 (TDD): 统一 Hub + Console 类 Claude Code 交互终端
 
 > **分支**: `feat/unified-console-tui`（基线提交 `388ad2b`，已包含 PR #16/#17/#18）  
-> **状态**: 修订版（已对齐 CI `not dt` / `dt` 分层与全量审阅意见，待最终确认）  
+> **状态**: 已实现，按 CI 的 `not dt` / `dt` 两层验证
 > **关联文档**: [SDD.md](./SDD.md) · [REQUIREMENTS.md](./REQUIREMENTS.md)
 
 ---
@@ -109,7 +109,7 @@ python -m pytest tests/test_avatars.py tests/test_console.py tests/test_unified_
 
 1. **功能与体验达标**：
    - 裸输 `acp`、`acp hub`（交互 TTY）、`acp console` 均一步直达 Console TUI，空闲端口自动内嵌启动 Hub，已有 Hub 自动附着，非 ACP 服务占口明确报错；`acp hub --headless` 与非 TTY 100% 兼容。
-   - 顶部固定 2 行通栏常驻右上角在线情况（单列着色符号 `●`/`◌`），中间 `DECSTBM` 滚动区无残影无截断，退出必发 `\x1b[r]` 复位终端，主消息流彻底消除 `Presence: ... is now ...` 刷屏。
+   - 顶部固定 2 行通栏常驻右上角在线情况（单列着色符号 `●`/`◌`），中间 `DECSTBM` 滚动区无残影无截断，退出必发 `\x1b[r` 复位终端，主消息流彻底消除 `Presence: ... is now ...` 刷屏。
    - 底部精简为 3 行输入 Dock，提示符为 **`@user::> `**，支持 CJK/Emoji 输入与 `/remove`、`/prune` 指令。
    - 所有成员（含人类自身 `/send`、`/post`、`/broadcast`）发言与 `/read` 均以 3 行高彩色像素小人头像渲染，无双重回显、无缺失头像、无 CJK 折行溢出。
 2. **测试全量通过**：

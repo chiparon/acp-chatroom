@@ -31,11 +31,14 @@ class Claim(NamedTuple):
 
 
 class ACPHub:
-    def __init__(self, host: str = "127.0.0.1", port: int = 8765, db_path: str = "acp_chatroom.db"):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8765, db_path: str = "acp_chatroom.db",
+                 *, defer_roster_reset: bool = False):
         self.host = host
         self.port = port
         self.storage = Storage(db_path)
-        self.storage.clear_roster()
+        self._defer_roster_reset = defer_roster_reset
+        if not defer_roster_reset:
+            self.storage.clear_roster()
         self.clients: Dict[str, WebSocketServerProtocol] = {}  # norm_handle (lower) -> ws
         self.ws_to_handle: Dict[WebSocketServerProtocol, str] = {}  # ws -> handle
         # Claims last for the owning socket's lifetime, including during native startup.
@@ -449,16 +452,29 @@ class ACPHub:
         else:
             return {"event": EventType.ERROR.value, "error": f"Unknown action: {action}"}
 
+    @property
+    def bound_port(self) -> int:
+        return self.server.sockets[0].getsockname()[1]
+
     async def start(self) -> None:
         self._running = True
         logger.info(f"Starting ACP Hub on ws://{self.host}:{self.port} ...")
-        self.server = await serve(self.handle_connection, self.host, self.port)
+        self.server = await serve(self.handle_connection, self.host, self.port, close_timeout=0.25, start_serving=False)
+        try:
+            if self._defer_roster_reset:
+                self.storage.clear_roster()
+            await self.server.start_serving()
+        except BaseException:
+            self.server.close()
+            await self.server.wait_closed()
+            raise
         logger.info("ACP Hub is ready.")
 
     async def stop(self) -> None:
         self._running = False
         if self.server:
             self.server.close()
+            await asyncio.gather(*(self._safe_close(ws) for ws in list(self.all_sockets)))
             await self.server.wait_closed()
         self.storage.clear_roster()
         logger.info("ACP Hub stopped.")

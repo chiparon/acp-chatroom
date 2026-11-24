@@ -1,7 +1,7 @@
 # 软件设计文档 (SDD): 统一 Hub + Console 类 Claude Code 交互终端
 
 > **分支**: `feat/unified-console-tui`（基线提交 `388ad2b`，已包含 PR #16/#17/#18）  
-> **状态**: 修订版（已整合全量代码审计意见，待最终确认）  
+> **状态**: 已实现
 > **关联文档**: [TDD.md](./TDD.md) · [REQUIREMENTS.md](./REQUIREMENTS.md)
 
 ---
@@ -77,7 +77,7 @@
 在 `acp/console.py`（及 `acp/hub.py` 辅助能力）中实现 `UnifiedConsoleRunner` 与 `start_unified_console(...)`：
 
 1. **WebSocket 协议层三态探测 (`probe_hub(uri, timeout=0.8)`)**：
-   - 使用 `websockets.connect(uri)` 发送 `{"action": "ping", "req_id": ...}` 并校验回包 `event == "pong"`（整个探测受 `asyncio.wait_for(..., timeout=0.8)` 限制），精确区分三种结果：
+   - 使用 `websockets.connect(uri)` 发送 `{"action": "ping", "req_id": ...}` 并校验回包 `event == "pong"`（WebSocket 握手与 PING 共用 0.8 秒超时。Windows 可能重试已被拒绝的 TCP SYN，单独给 TCP 建连最多 5 秒，以免将空闲端口误判为非 ACP 服务），精确区分三种结果：
      - **`ALIVE_HUB`**：收到合法 `pong` ➔ 目标已是存活 ACP Hub ➔ `owns_hub = False`，直接附着连接。
      - **`PORT_FREE`**：连接被拒绝（`ConnectionRefusedError` / 本地端口无监听）：
        - 若 `auto_hub=True` 且目标为本地回环/可绑定地址（`127.0.0.1`、`localhost`、`::1`、`0.0.0.0`、`::`）：在同事件循环内创建并 `await hub.start()`，记录 `owns_hub = True`。
@@ -192,7 +192,7 @@ Row H  │ Commands: /send | /post | /broadcast | /read | /roster | /remove | /p
      输入光标全程不闪烁、草稿零中断。
    - `/remove` 和 `/prune` 修改 `self.roster_state` 后同样立即刷新顶部通栏 Row 1。
 4. **窗口缩放 (`_handle_resize`)**：
-   - POSIX 下监听 `SIGWINCH` 设置 `_resize_pending = True`；Windows 及跨平台均在主循环 0.3s tick、`_emit()` 及按键重绘前对比 `shutil.get_terminal_size()`。
+   - 各平台在主循环的 0.3 秒 tick、消息输出及按键重绘前，通过 Rich Console 读取当前终端尺寸。
    - 尺寸变化时重新设置 `\x1b[3;{new_bottom}r`（或降级）、清绘顶部通栏与底部 3 行 Dock、钳制 `_feed_row = min(_feed_row, new_bottom)` 并归位输入光标。
 5. **人类自身发言的头像展示与去重策略**：
    - 在 `handle_key` 按回车提交时：
