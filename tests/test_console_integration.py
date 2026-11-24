@@ -109,20 +109,28 @@ async def test_unified_console_pty_autostarts_hub_and_receives_agent(tmp_path):
     )
     screen = ""
     async def expect(pattern):
-        nonlocal screen
-        while not (match := re.search(pattern, screen)):
-            screen += await asyncio.to_thread(proc.read)
-        return match
+        async def read_until_match():
+            nonlocal screen
+            while True:
+                # Rich and ConPTY may insert SGR changes inside the URI or artwork.
+                plain = re.sub(r"\x1b\[[0-9;:]*m", "", screen)
+                if match := re.search(pattern, plain):
+                    return match
+                screen += await asyncio.to_thread(proc.read)
+        try:
+            return await asyncio.wait_for(read_until_match(), 10)
+        except asyncio.TimeoutError:
+            pytest.fail(f"Missing {pattern!r} in ConPTY output {screen[-4000:]!r}")
 
     agent = ACPClient(handle="@codex")
     try:
-        banner = await asyncio.wait_for(expect(r"Hub: Embedded (ws://127\.0\.0\.1:\d+) "), 10)
+        banner = await expect(r"Hub: Embedded (ws://127\.0\.0\.1:\d+) ")
         agent.uri = banner[1]
         assert "Draft Input" in screen and "@user::>" in screen
         await agent.connect()
         await agent.send_message("@user", "PTY delivery confirmed", MessageMode.EXPLICIT)
-        await asyncio.wait_for(expect("PTY delivery confirmed"), 5)
-        await asyncio.wait_for(expect("╰▀─▀╯"), 5)
+        await expect("PTY delivery confirmed")
+        await expect("╰▀─▀╯")
         assert "@codex" in screen and "Presence:" not in screen
         proc.write("/quit\r")
         await asyncio.wait_for(asyncio.to_thread(proc.wait), 3)
