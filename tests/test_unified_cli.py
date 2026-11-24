@@ -108,6 +108,37 @@ async def test_attaching_preserves_external_hub(tmp_path, monkeypatch):
 
 
 @pytest.mark.dt
+async def test_back_keeps_host_and_peer_online_for_rejoin(tmp_path, monkeypatch):
+    host = UnifiedConsoleRunner(uri="ws://127.0.0.1:0", db_path=str(tmp_path / "room.db"))
+    peer = ACPClient(handle="@peer")
+    leaving = asyncio.Event()
+
+    async def leave(console):
+        if console.hub_mode == "host":
+            peer.uri = console.uri
+            await peer.connect()
+            leaving.set()
+        assert console.handle_command("/back") is False
+
+    monkeypatch.setattr(ui.HumanConsole, "_input_loop", leave)
+    task = asyncio.create_task(host.run())
+    try:
+        await asyncio.wait_for(leaving.wait(), 3)
+        async def wait_for_departure():
+            while any(row["handle"] == "@user" for row in await peer.get_roster()):
+                await asyncio.sleep(0.01)
+        await asyncio.wait_for(wait_for_departure(), 2)
+        await asyncio.wait_for(UnifiedConsoleRunner(uri=host.uri).run(), 2)
+        assert not task.done()
+        assert any(row["handle"] == "@peer" for row in await peer.get_roster())
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await peer.close()
+    assert await probe_hub(host.uri) is ui.ProbeResult.PORT_FREE
+
+
+@pytest.mark.dt
 async def test_attached_console_detects_disconnect(tmp_path, monkeypatch):
     hub = ACPHub(port=0, db_path=str(tmp_path / "external.db"))
     await hub.start()

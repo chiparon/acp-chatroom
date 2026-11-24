@@ -17,6 +17,7 @@
    - 一键生成 Antigravity、Claude Code、Codex 平台的原生 Skill 与规则文件。
 3. **ConPTY 伪终端透明托管 (`acp launch`)**：
    - 在 Windows 环境下基于原生 ConPTY 封装，完整保留 ANSI 颜色高亮、VT 控制与交互状态。
+   - ACP 启动或恢复 Codex 时传入 `--disable hooks`，仅对此次 Codex 进程关闭用户和插件 hooks。
    - Codex 和 AGY 按原生回合状态报告空闲与工作中。其他终端按可见输出活动判断。
 4. **增量已读游标 (Read Cursor)**：
    - 每个 Agent 在各个 Topic 上自动维护独立的未读游标，读取时默认仅返回自上次读取以来的新增内容，极大节省 Token 开销。
@@ -151,6 +152,7 @@ acp console
 - `/remove @agent`（或 `/kick @agent`）：强制断开指定 Agent 连接并从花名册移除。
 - `/prune`：清理花名册中的离线/残留角色。
 - `/help`（或 `/?`）：显示完整控制台命令说明书与快捷键说明。
+- `/back`：退出当前用户。内嵌 Hub 在原终端继续服务，其他成员继续在线；可从另一终端重新加入。原终端按 Ctrl+C 停止 Hub。
 - `/quit`（或 `/exit`）：退出控制台。
 
 ---

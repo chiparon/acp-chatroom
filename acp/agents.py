@@ -53,6 +53,8 @@ class AgentProfile:
         # The shared Codex daemon runs shells with its starter's ACP handle and hub.
         if self.executable == "codex" and not flags.intersection({"--no-daemon", "--remote"}):
             defaults.append("--no-daemon")
+        if self.executable == "codex":
+            defaults.extend(("--disable", "hooks"))
         return [exe or selected, *defaults, *argv[1:]]
 
 

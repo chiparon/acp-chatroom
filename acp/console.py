@@ -142,6 +142,7 @@ class HumanConsole:
         self._dock_active = False
         self.hub_mode = "client"
         self.attach_notice = ""
+        self.keep_hub_running = False
         self._viewport = None
         self._feed_row = 3
         self._feed_at_bottom = False
@@ -210,7 +211,7 @@ class HumanConsole:
         separator = _clip_to_cells(label + "─" * cells, cells)
         prompt = _clip_to_cells(terminal_text(self.handle).replace("\n", " ") + "::> ", cells)
         visible, offset = _window_around_cursor(self._input_buffer, self._cursor_pos, cells - cell_len(prompt))
-        commands = "/send /post /broadcast /read /roster /remove /prune /help /quit"
+        commands = "/send /post /broadcast /read /roster /remove /prune /help /back /quit"
         full = "Commands: " + commands.replace(" ", " | ")
         return [separator, prompt + visible, _clip_to_cells(full if cell_len(full) <= cells else commands, cells)], 1, cell_len(prompt) + offset
 
@@ -322,6 +323,7 @@ class HumanConsole:
                     "  [red]/remove @agent[/red] (or [red]/kick[/red])      Disconnect @agent and remove from roster\n"
                     "  [red]/prune[/red]                         Remove all offline/stale entries from roster\n"
                     "  [blue]/help[/blue], [blue]/?[/blue], [blue]help[/blue]                Show this command reference\n"
+                    "  [cyan]/back[/cyan]                          Leave the console and keep the Hub online\n"
                     "  [red]/quit[/red], [red]/exit[/red], [red]:q[/red]             Disconnect and exit console\n\n"
                     "[bold]Input Box Shortcuts:[/bold]\n"
                     "  [dim]Left/Right, Home/End[/dim]           Move cursor inside active draft\n"
@@ -402,7 +404,8 @@ class HumanConsole:
         raw = raw.strip()
         if not raw:
             return True
-        if raw in ("/quit", "/exit", ":q"):
+        if raw in ("/back", "/quit", "/exit", ":q"):
+            self.keep_hub_running = raw == "/back"
             self._running = False
             return False
         if raw in ("/help", "/?", "help"):
@@ -883,6 +886,10 @@ class UnifiedConsoleRunner:
                 if self.explicit_hub_options and not self.owns_hub:
                     self.console.attach_notice = " · Using the existing Hub and its database"
                 await self.console.run()
+                if self.owns_hub and self.console.keep_hub_running:
+                    click.echo(f"Hub online at {self.uri}. Rejoin with acp console --uri {self.uri} "
+                               "from another terminal. Ctrl+C stops the Hub.")
+                    await self.hub.server.wait_closed()
             finally:
                 if self.owns_hub:
                     await self.hub.stop()
