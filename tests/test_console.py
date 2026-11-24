@@ -22,6 +22,20 @@ def _make_test_console(width: int = 80, dock_active: bool = True) -> tuple[Human
     return hc, buf
 
 
+def test_batched_literal_edits_only_the_draft_row():
+    hc, buf = _make_test_console()
+    hc.handle_key("前后", literal=True)
+    hc.handle_key("LEFT")
+    buf.seek(0)
+    buf.truncate(0)
+    hc.handle_key("HOME", literal=True)
+    hc.handle_key("😀中", literal=True)
+    assert hc._input_buffer == "前HOME😀中后"
+    assert hc._cursor_pos == len("前HOME😀中")
+    assert "Commands" not in buf.getvalue()
+    assert "Draft Input" not in buf.getvalue()
+
+
 def test_notices_never_corrupt_active_input_draft(monkeypatch):
     hc, buf = _make_test_console(width=80, dock_active=True)
     sent = []

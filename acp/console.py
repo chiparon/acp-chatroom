@@ -102,23 +102,27 @@ def _window_around_cursor(text: str, cursor_pos: int, max_cells: int) -> tuple[s
     if max_cells <= 0:
         return "", 0
     cursor_pos = max(0, min(cursor_pos, len(text)))
-    left_chars = list(text[:cursor_pos])
-    left_widths = [max(0, cell_len(c)) for c in left_chars]
 
     start = cursor_pos
     used = 0
     # Reserve at least 1 cell for cursor/lookahead if characters exist after the cursor.
     left_budget = max_cells if cursor_pos == len(text) else max(1, max_cells - 1)
     while start > 0:
-        w = left_widths[start - 1]
+        w = max(0, cell_len(text[start - 1]))
         if used + w > left_budget:
             break
         used += w
         start -= 1
 
-    visible_right = _clip_to_cells(text[cursor_pos:], max_cells - used)
-    visible = text[start:cursor_pos] + visible_right
-    return visible, used
+    end = cursor_pos
+    remaining = max_cells - used
+    while end < len(text):
+        width = max(0, cell_len(text[end]))
+        if width > remaining:
+            break
+        remaining -= width
+        end += 1
+    return text[start:end], used
 
 
 class HumanConsole:
@@ -209,11 +213,15 @@ class HumanConsole:
         cells = max(0, (width if width is not None else self._out_console.width) - 1)
         label = "─ Draft Input (Enter send · Esc clear · /help manual) "
         separator = _clip_to_cells(label + "─" * cells, cells)
-        prompt = _clip_to_cells(terminal_text(self.handle).replace("\n", " ") + "::> ", cells)
-        visible, offset = _window_around_cursor(self._input_buffer, self._cursor_pos, cells - cell_len(prompt))
+        line, col = self._draft_line(cells)
         commands = "/send /post /broadcast /read /roster /remove /prune /help /back /quit"
         full = "Commands: " + commands.replace(" ", " | ")
-        return [separator, prompt + visible, _clip_to_cells(full if cell_len(full) <= cells else commands, cells)], 1, cell_len(prompt) + offset
+        return [separator, line, _clip_to_cells(full if cell_len(full) <= cells else commands, cells)], 1, col
+
+    def _draft_line(self, cells: int) -> tuple[str, int]:
+        prompt = _clip_to_cells(terminal_text(self.handle).replace("\n", " ") + "::> ", cells)
+        visible, offset = _window_around_cursor(self._input_buffer, self._cursor_pos, cells - cell_len(prompt))
+        return prompt + visible, cell_len(prompt) + offset
 
     def _refresh_header(self):
         with self._ui_lock:
@@ -511,11 +519,17 @@ class HumanConsole:
                 (not response.get("delivered") or message["target"].lstrip("@").lower() != self.handle[1:].lower())):
             self._message({"message": message, **response}, mode.value)
 
-    def handle_key(self, key: str, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
-        """Apply one keystroke or named navigation key to the separated draft input buffer."""
+    def handle_key(self, key: str, loop: Optional[asyncio.AbstractEventLoop] = None,
+                   *, literal: bool = False) -> None:
+        """Apply a key event or an explicitly literal run of decoded input to the draft."""
         submit_line: Optional[str] = None
         with self._ui_lock:
-            if key in ("\r", "\n"):
+            if literal or (len(key) == 1 and ord(key) >= 32 and key != "\x7f"):
+                self._input_buffer = (
+                    self._input_buffer[:self._cursor_pos] + key + self._input_buffer[self._cursor_pos:]
+                )
+                self._cursor_pos += len(key)
+            elif key in ("\r", "\n"):
                 submit_line = self._input_buffer
                 self._input_buffer = ""
                 self._cursor_pos = 0
@@ -572,17 +586,13 @@ class HumanConsole:
                         self._history_index = None
                         self._input_buffer = self._draft_stash
                     self._cursor_pos = len(self._input_buffer)
-            elif len(key) == 1 and ord(key) >= 32:
-                self._input_buffer = (
-                    self._input_buffer[: self._cursor_pos]
-                    + key
-                    + self._input_buffer[self._cursor_pos :]
-                )
-                self._cursor_pos += 1
-
             if self._dock_active:
                 if not self._running:
                     self._finish_dock()
+                elif self._viewport == tuple(self._out_console.size) and self._viewport[1] >= 8:
+                    width, height = self._viewport
+                    line, col = self._draft_line(width - 1)
+                    self._write_raw_stdout(f"\x1b[{height - 1};1H\x1b[2K{line}\x1b[{col + 1}G")
                 else:
                     self._redraw_dock()
 
@@ -601,15 +611,27 @@ class HumanConsole:
                 if not msvcrt.kbhit():
                     time.sleep(0.02)
                     continue
-                # getwch() returns a UTF-16 code unit; draw only complete characters.
-                unit = msvcrt.getwch().encode("utf-16-le", errors="surrogatepass")
-                for ch in decoder.decode(unit):
-                    if ch in ("\x00", "\xe0"):
-                        mapped = arrow_map.get(msvcrt.getwch())
-                        if mapped:
-                            self.handle_key(mapped, loop=loop)
-                    else:
-                        self.handle_key(ch, loop=loop)
+                # Drain only queued input. A single IME commit never waits for a second key.
+                pending = []
+                for _ in range(256):
+                    unit = msvcrt.getwch().encode("utf-16-le", errors="surrogatepass")
+                    for ch in decoder.decode(unit):
+                        if ord(ch) >= 32 and ch not in ("\xe0", "\x7f"):
+                            pending.append(ch)
+                            continue
+                        if pending:
+                            self.handle_key("".join(pending), loop, literal=True)
+                            pending.clear()
+                        if ch in ("\x00", "\xe0"):
+                            mapped = arrow_map.get(msvcrt.getwch())
+                            if mapped:
+                                self.handle_key(mapped, loop)
+                        else:
+                            self.handle_key(ch, loop)
+                    if not self._running or not msvcrt.kbhit():
+                        break
+                if pending:
+                    self.handle_key("".join(pending), loop, literal=True)
             return
 
         fd = sys.stdin.fileno()
